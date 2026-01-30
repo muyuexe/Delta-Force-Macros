@@ -1,0 +1,11 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Folder Name="/解决方案项/">
+    <File Path="Readme.txt" />
+    <File Path="草稿本.txt" />
+  </Folder>
+  <Project Path="三角洲宏.vcxproj" Id="2bc45d81-e41e-4c90-a813-9a11eda40f5f" />
+</Solution>
