@@ -141,15 +141,6 @@ static void Tap(BYTE vk, ULONG_PTR extra = 0) {
 	Release(vk, extra);
 }
 
-// 模拟滚轮：专门处理带有偏移量的滚轮信号
-static void SendWheel(int delta) {
-	INPUT input = { 0 };
-	input.type = INPUT_MOUSE;
-	input.mi.dwFlags = MOUSEEVENTF_WHEEL;
-	input.mi.mouseData = (DWORD)delta; // 正数为上滚，负数为下滚
-	SendInput(1, &input, sizeof(INPUT));
-}
-
 static void ResetAim() {
 	// 检查 U 账本
 	if (Aim.u.load()) {
@@ -361,31 +352,26 @@ static void Thread_Space_Loop() {
 static void Thread_MW_Loop() {
 	while (WaitForSingleObject(MWevent, INFINITE) == WAIT_OBJECT_0) {
 		int sDelta = MW.exchange(0);
-		// 滚轮属于单次瞬时操作，仅在激活时消费
+
+		// 只有在 isActive 且 sDelta 有效时处理
+		// 注意：能走到这里的信号，一定是 Hook 拦截下来的（XB1没按下时）
 		if (sDelta != 0 && IsTargetActive()) {
 
-			// 条件 A: 如果侧键 1 按下，输出物理滚轮信号 (透传)
-			if (XB1.load()) {
-				SendWheel(sDelta);
-			}
-			// 条件 B: 侧键 1 没按下，执行原脚本功能
-			else {
-				if (sDelta < 0) { // 下滚切换模式
-					ResetAim();
-					M = (M == Shoulder) ? Scope : Shoulder;
-					if (g_hNotifyWnd && IsWindow(g_hNotifyWnd)) {
-						PostMessage(g_hNotifyWnd, WM_USER + 100, 0, 0);
-					}
+			if (sDelta < 0) { // 下滚切换模式
+				ResetAim();
+				M = (M == Shoulder) ? Scope : Shoulder;
+				if (g_hNotifyWnd && IsWindow(g_hNotifyWnd)) {
+					PostMessage(g_hNotifyWnd, WM_USER + 100, 0, 0);
 				}
-				else if (sDelta > 0) { // 上滚执行 Press
-					if (!RB.load()) {
-						ResetAim();
-						BYTE target = (M == Shoulder) ? 'U' : VK_RBUTTON;
-						Press(target);
-					}
-					else {
-						S = true;
-					}
+			}
+			else if (sDelta > 0) { // 上滚执行逻辑
+				if (!RB.load()) {
+					ResetAim();
+					BYTE target = (M == Shoulder) ? 'U' : VK_RBUTTON;
+					Press(target);
+				}
+				else {
+					S = true;
 				}
 			}
 		}
@@ -599,7 +585,7 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 			break;
 		}
 	}
-	return CallNextHookEx(NULL, nCode, wParam, lParam);
+	return Pass;
 }
 
 static LRESULT CALLBACK MouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
@@ -622,24 +608,34 @@ static LRESULT CALLBACK MouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
 			int xNum = HIWORD(m->mouseData);
 
 			if (xNum == 1) {
-				// 侧键 1：按下仅在 isActive 时生效，但松开必须同步（复位）
+				// 侧键 1 处理
 				if (state) {
-					if (isActive) XB1 = true;
+					if (isActive) {
+						XB1 = true;
+						return 1; // 在游戏内按下：拦截物理信号，仅触发内部开关
+					}
 				}
 				else {
-					XB1 = false;
+					XB1 = false; // 松开：同步状态
+					if (isActive) return 1; // 在游戏内松开：拦截物理信号
 				}
-				return Pass;
+				return Pass; // 非游戏内，放行原键位逻辑
 			}
+
 			if (xNum == 2) {
-				// 侧键 2：按下仅在 isActive 时生效，但松开必须同步（复位）并唤醒线程熄火
+				// 侧键 2 处理
 				if (state) {
-					if (isActive) XB2 = true;
+					if (isActive) {
+						XB2 = true;
+						SetEvent(XB2event); // 唤醒连招线程
+						return 1; // 在游戏内按下：拦截
+					}
 				}
 				else {
-					XB2 = false;
+					XB2 = false; // 松开：让线程通过 while 判断熄火
+					SetEvent(XB2event); // 再次触发事件确保线程从 Wait 中醒来检查 XB2 状态
+					if (isActive) return 1; // 在游戏内松开：拦截
 				}
-				SetEvent(XB2event);
 				return Pass;
 			}
 			break;
@@ -670,18 +666,25 @@ static LRESULT CALLBACK MouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
 			break;
 		}
 
-		// --- 滚轮处理：记录增量并通知模式切换线程 Thread_MW_Loop ---
+		// --- 滚轮处理 ---
 		case WM_MOUSEWHEEL:
+		{
 			if (isActive) {
-				short rDelta = (short)HIWORD(m->mouseData);
-				MW.fetch_add(rDelta);
-				SetEvent(MWevent);
-				return 1;
+				if (XB1.load()) {
+					return Pass;
+				}
+				else {
+					short rDelta = (short)HIWORD(m->mouseData);
+					MW = (int)rDelta;
+					SetEvent(MWevent);
+					return 1;
+				}
 			}
 			break;
 		}
+		}
 	}
-	return CallNextHookEx(NULL, nCode, wParam, lParam);
+	return Pass;
 }
 
 // --- 【功能 10】 准星 UI 绘制 (对游戏帧率影响极小) ---
@@ -873,26 +876,25 @@ static void FreezeAllSubThreads() {
 	CloseHandle(hSnap);
 }
 
-static void ClaenAll() {
+static void Alignkeys() {
 	const BYTE keys[] = {
-		'U', 'H', 'A', 'D', 'N', 'M', VK_OEM_PERIOD, VK_OEM_COMMA,
+		'U', 'H', 'A', 'D', 'N', 'M', VK_OEM_PERIOD, VK_OEM_1,
 		'1', '2', '3', '4', 'L', 'F', VK_SPACE,
-		VK_LCONTROL, VK_CAPITAL, VK_RBUTTON, VK_LBUTTON
+		VK_LCONTROL, VK_CAPITAL, VK_RBUTTON
 	};
-	for (BYTE vk : keys) {
-		bool logical = g_Out[vk].load();
-		bool physical = (GetAsyncKeyState(vk) & 0x8000) != 0;
 
-		if (logical && !physical) {
-			if (vk == VK_RBUTTON || vk == VK_LBUTTON) SendMouse(vk, false);
-			else SendKey(vk, false);
+	for (BYTE vk : keys) {
+		bool phy = (GetAsyncKeyState(vk) & 0x8000) != 0;
+
+		// 如果逻辑与物理不一致
+		if (g_Out[vk] != phy) {
+			// 以物理状态(phy)为准进行补发
+			if (vk >= 0x01 && vk <= 0x06) SendMouse(vk, phy);
+			else SendKey(vk, phy);
+
+			// 状态对齐
+			g_Out[vk] = phy;
 		}
-		else if (!logical && physical) {
-			// 这部分是你要求的：物理按了但逻辑没按（被拦截了），补发按下
-			if (vk == VK_RBUTTON || vk == VK_LBUTTON) SendMouse(vk, true);
-			else SendKey(vk, true);
-		}
-		g_Out[vk] = false;
 	}
 }
 
@@ -942,7 +944,7 @@ int WINAPI WinMain(
 
 	// 程序退出前的清理工作
 	FreezeAllSubThreads();
-	ClaenAll();
+	Alignkeys();
 	UnhookWindowsHookEx(kHook); UnhookWindowsHookEx(mHook);
 
 	timeEndPeriod(1); // 记得恢复系统定时器精度
