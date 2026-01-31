@@ -382,15 +382,23 @@ static void Thread_MW_Loop() {
 static void Thread_RB_Loop() {
 	while (WaitForSingleObject(RBevent, INFINITE) == WAIT_OBJECT_0) {
 		if (RB.load()) {
+			// --- 新增：C 键联动判定 ---
+			ULONGLONG lastC = CT64.load(std::memory_order_relaxed);
+			if (lastC > 0) {
+				ULONGLONG now = GetTickCount64();
+				if (now - lastC <= 4000) { // 4000ms 窗口期
+					Tap(VK_OEM_COMMA);    // 执行 "," 键动作
+					CT64.store(0);         // 消耗掉计次，防止 4 秒内二次右键重复触发
+				}
+			}
+
 			Press('H');
-			// ... CT64 处理逻辑 ...
 			ResetAim();
 			if (M == Shoulder) {
 				Press('U');
-				// 核心修改：利用 Tap 实现瞬间点击，Hook 会自动处理 g_Out
 				std::thread([]() {
 					Wait(10);
-					Tap(VK_RBUTTON, AIM_SKIP);//传入 AIM_SKIP。Hook 看到这个右键会放行，但不会修改 Aim 账本
+					Tap(VK_RBUTTON, AIM_SKIP);
 					}).detach();
 			}
 			else {
@@ -486,8 +494,10 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 			   // 【战术 C 键】
 	case 'C':
 		if (isActive && !XB1) {
-			if (state) CT64 = GetTickCount64();
-			return 1;
+			if (state) { // 仅在物理按下的一瞬间刷新时间戳
+				CT64.store(GetTickCount64(), std::memory_order_relaxed);
+			}
+			return 1; // 彻底拦截 C 键信号，不传给游戏
 		}
 		break;
 	}
@@ -781,7 +791,7 @@ static void FreezeAllSubThreads() {
 static void Alignkeys() {
 	const BYTE keys[] = {
 		'U', 'H', 'A', 'D', 'N', 'M', VK_OEM_PERIOD, VK_OEM_1,
-		'1', '2', '3', '4', 'L', 'F', VK_SPACE,
+		'1', '2', '3', '4', 'L', 'F', VK_SPACE, VK_OEM_COMMA,
 		VK_LCONTROL, VK_CAPITAL, VK_RBUTTON
 	};
 
