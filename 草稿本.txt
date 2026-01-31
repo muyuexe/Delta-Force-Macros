@@ -1,4 +1,27 @@
-﻿release并非无效果，请修改为有按下才release，并留意因此带来的变动。  检查press逻辑可能调用的键，并让键位输出与物理状态统一
+﻿架枪左键后自动一直屏息有必要吗？
 
-开脚本鼠标位置被重置
-点击游戏框才激活脚本？
+// Pass 宏：放行并审计物理按键状态
+#define Pass ([&](){\
+    bool _isDown = false; DWORD _vk = 0; ULONG_PTR _ex = 0;\
+    if (nCode == HC_ACTION) {\
+        if (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN) { _isDown = true; _vk = ((KBDLLHOOKSTRUCT*)lParam)->vkCode; _ex = ((KBDLLHOOKSTRUCT*)lParam)->dwExtraInfo; }\
+        else if (wParam == WM_KEYUP || wParam == WM_SYSKEYUP) { _isDown = false; _vk = ((KBDLLHOOKSTRUCT*)lParam)->vkCode; _ex = ((KBDLLHOOKSTRUCT*)lParam)->dwExtraInfo; }\
+        else if (wParam == WM_LBUTTONDOWN) { _isDown = true; _vk = VK_LBUTTON; _ex = ((MSLLHOOKSTRUCT*)lParam)->dwExtraInfo; }\
+        else if (wParam == WM_LBUTTONUP) { _isDown = false; _vk = VK_LBUTTON; _ex = ((MSLLHOOKSTRUCT*)lParam)->dwExtraInfo; }\
+        else if (wParam == WM_RBUTTONDOWN) { _isDown = true; _vk = VK_RBUTTON; _ex = ((MSLLHOOKSTRUCT*)lParam)->dwExtraInfo; }\
+        else if (wParam == WM_RBUTTONUP) { _isDown = false; _vk = VK_RBUTTON; _ex = ((MSLLHOOKSTRUCT*)lParam)->dwExtraInfo; }\
+        else if (wParam == WM_XBUTTONDOWN || wParam == WM_XBUTTONUP) {\
+            _isDown = (wParam == WM_XBUTTONDOWN); _ex = ((MSLLHOOKSTRUCT*)lParam)->dwExtraInfo;\
+            _vk = (HIWORD(((MSLLHOOKSTRUCT*)lParam)->mouseData) == 1) ? VK_XBUTTON1 : VK_XBUTTON2;\
+        }\
+    }\
+    /* 1. g_Out 影子账本 (永远记录) */\
+    if (_vk > 0 && _vk < 256) g_Out[_vk].store(_isDown, std::memory_order_relaxed);\
+    \
+    /* 2. Aim 业务账本 (在 g_Out 基础上加黑名单) */\
+    if (_ex != AIM_SKIP) {\
+        if (_vk == 'U') Aim.u.store(_isDown, std::memory_order_relaxed);\
+        else if (_vk == VK_RBUTTON) Aim.r.store(_isDown, std::memory_order_relaxed);\
+    }\
+    return CallNextHookEx(NULL, nCode, wParam, lParam);\
+}())

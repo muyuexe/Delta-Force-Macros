@@ -15,20 +15,50 @@
 #pragma comment(lib, "Gdi32.lib")
 #pragma comment(lib, "Winmm.lib")
 
+// AIM_SKIP: 特殊操作码。当 dwExtraInfo 为此值时，Hook 不会更新 Aim 业务账本
+const ULONG_PTR AIM_SKIP = 0xACE;
+
+// Pass 宏：放行并审计物理按键状态
 #define Pass ([&](){\
+    bool _isDown = false; DWORD _vk = 0; ULONG_PTR _ex = 0;\
+    if (nCode == HC_ACTION) {\
+        if (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN) { _isDown = true; _vk = ((KBDLLHOOKSTRUCT*)lParam)->vkCode; _ex = ((KBDLLHOOKSTRUCT*)lParam)->dwExtraInfo; }\
+        else if (wParam == WM_KEYUP || wParam == WM_SYSKEYUP) { _isDown = false; _vk = ((KBDLLHOOKSTRUCT*)lParam)->vkCode; _ex = ((KBDLLHOOKSTRUCT*)lParam)->dwExtraInfo; }\
+        else if (wParam == WM_LBUTTONDOWN) { _isDown = true; _vk = VK_LBUTTON; _ex = ((MSLLHOOKSTRUCT*)lParam)->dwExtraInfo; }\
+        else if (wParam == WM_LBUTTONUP) { _isDown = false; _vk = VK_LBUTTON; _ex = ((MSLLHOOKSTRUCT*)lParam)->dwExtraInfo; }\
+        else if (wParam == WM_RBUTTONDOWN) { _isDown = true; _vk = VK_RBUTTON; _ex = ((MSLLHOOKSTRUCT*)lParam)->dwExtraInfo; }\
+        else if (wParam == WM_RBUTTONUP) { _isDown = false; _vk = VK_RBUTTON; _ex = ((MSLLHOOKSTRUCT*)lParam)->dwExtraInfo; }\
+        else if (wParam == WM_XBUTTONDOWN || wParam == WM_XBUTTONUP) {\
+            _isDown = (wParam == WM_XBUTTONDOWN); _ex = ((MSLLHOOKSTRUCT*)lParam)->dwExtraInfo;\
+            _vk = (HIWORD(((MSLLHOOKSTRUCT*)lParam)->mouseData) == 1) ? VK_XBUTTON1 : VK_XBUTTON2;\
+        }\
+    }\
+    /* 1. g_Out 影子账本 (永远记录) */\
+    if (_vk > 0 && _vk < 256) g_Out[_vk].store(_isDown, std::memory_order_relaxed);\
+    \
+    /* 2. Aim 业务账本 (在 g_Out 基础上加黑名单) */\
+    if (_ex != AIM_SKIP) {\
+        if (_vk == 'U') Aim.u.store(_isDown, std::memory_order_relaxed);\
+        else if (_vk == VK_RBUTTON) Aim.r.store(_isDown, std::memory_order_relaxed);\
+    }\
     return CallNextHookEx(NULL, nCode, wParam, lParam);\
 }())
 
 // Mode: 开镜模式 (Shoulder/Scope)
 enum Mode : BYTE { Shoulder, Scope };
-// Output: 输出账本 (U Key / Right Mouse Button)
-enum Output : BYTE { None, U_Key = 'U', RMW = VK_RBUTTON };
 
-// 使用原子变量确保多线程安全
+// 影子账本：记录实际发出的逻辑按下状态，不参与业务逻辑
+std::atomic<bool> g_Out[256]{ false };
+
+// Aim: 业务账本，记录脚本逻辑发出的按下状态
+struct AimLedger {
+	std::atomic<bool> u{ false };
+	std::atomic<bool> r{ false };
+};
+AimLedger Aim;
+
 // M: Mode (模式)
-std::atomic<Mode> M{ Shoulder };
-// O: Output (输出账本)
-std::atomic<Output> O{ None };
+std::atomic<Mode> M{ Scope };
 // S: Shield (屏蔽位)
 std::atomic<bool> S{ false };
 // Num: NuMWer (状态器数值)
@@ -53,10 +83,10 @@ std::atomic<bool> g_IsGameActive{ false };
 //线程触发事件句柄
 HANDLE XB2event, Fevent, SPACEevent, RBevent, MWevent;
 
+HWND g_hNotifyWnd = NULL; // UI全局句柄
+
 // 记录主线程 ID，用于跨线程通信
 DWORD g_mainThreadId = 0;
-
-static void ReleaseAll();
 
 // --- 基础动作封装函数 ---
 
@@ -65,103 +95,78 @@ static void Wait(int ms) {
 	std::this_thread::sleep_for(std::chrono::milliseconds(ms));
 }
 
-// 模拟按键：采用 SendInput 配合硬件扫描码，提升 PVP 兼容性与响应速度
-static void SendKey(BYTE vk, bool down) {
+// 修改 SendKey
+static void SendKey(BYTE vk, bool down, ULONG_PTR extra = 0) {
 	INPUT input = { 0 };
 	input.type = INPUT_KEYBOARD;
-	input.ki.wVk = 0; // 使用扫描码模式时，wVk 设为 0
+	input.ki.wVk = 0;
 	input.ki.wScan = (WORD)MapVirtualKey(vk, MAPVK_VK_TO_VSC);
-	input.ki.dwFlags = KEYEVENTF_SCANCODE;
-	if (!down) input.ki.dwFlags |= KEYEVENTF_KEYUP;
+	input.ki.dwFlags = KEYEVENTF_SCANCODE | (down ? 0 : KEYEVENTF_KEYUP);
+	input.ki.dwExtraInfo = extra; // 将暗号塞进 Windows 输入流
 
-	// 处理扩展键标志（如方向键、侧边键等）
 	if (vk == VK_RMENU || vk == VK_RCONTROL || (vk >= 33 && vk <= 46)) {
 		input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
 	}
-
-	// 核心修复：SendInput 发出的信号会被系统标记为 LLKHF_INJECTED
 	SendInput(1, &input, sizeof(INPUT));
 }
 
-// 模拟鼠标点击：解决肩射模式拦截的关键
-static void SendMouse(BYTE vk, bool down) {
+// 修改 SendMouse
+static void SendMouse(BYTE vk, bool down, ULONG_PTR extra = 0) {
 	INPUT input = { 0 };
 	input.type = INPUT_MOUSE;
+	input.mi.dwExtraInfo = extra; // 将暗号塞进 Windows 输入流
 	if (vk == VK_RBUTTON) {
 		input.mi.dwFlags = down ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_RIGHTUP;
 	}
 	else if (vk == VK_LBUTTON) {
 		input.mi.dwFlags = down ? MOUSEEVENTF_LEFTDOWN : MOUSEEVENTF_LEFTUP;
 	}
-	// 注入标志位 LLMHF_INJECTED 会被系统自动添加
 	SendInput(1, &input, sizeof(INPUT));
 }
 
-// 修正版：按下按键（自带记账功能）
-static void Press(BYTE vk) {
-	// --- 自动化标记过程 ---
-	if (vk == 'U') O = U_Key;
-	else if (vk == VK_RBUTTON) O = RMW;
-	// 注意：如果是其他键（如 'H', 'F'），则不触碰账本 O
-
-	if (vk == VK_RBUTTON || vk == VK_LBUTTON) SendMouse(vk, true);
-	else SendKey(vk, true);
+// 修改 Press / Release / Tap 顺延传递参数
+static void Press(BYTE vk, ULONG_PTR extra = 0) {
+	if (vk == VK_RBUTTON || vk == VK_LBUTTON) SendMouse(vk, true, extra);
+	else SendKey(vk, true, extra);
 }
 
-// 修正版：松开按键（自带抹账功能）
-static void Release(BYTE vk) {
-	if (vk == VK_RBUTTON || vk == VK_LBUTTON) SendMouse(vk, false);
-	else SendKey(vk, false);
-
-	// --- 自动化抹账过程 ---
-	// 如果松开的是当前账本记录的键，则清空账本
-	if ((BYTE)O.load() == vk) {
-		O = None;
-	}
+static void Release(BYTE vk, ULONG_PTR extra = 0) {
+	if (vk == VK_RBUTTON || vk == VK_LBUTTON) SendMouse(vk, false, extra);
+	else SendKey(vk, false, extra);
 }
 
-// 新增封装：按下并松开，中间带5ms延迟
-static void Tap(BYTE vk) {
-	Press(vk);
+static void Tap(BYTE vk, ULONG_PTR extra = 0) {
+	Press(vk, extra);
 	Wait(5);
-	Release(vk);
+	Release(vk, extra);
 }
 
-// 修正版：强制标准化滚轮刻度，解决游戏内不识别的问题
+// 模拟滚轮：专门处理带有偏移量的滚轮信号
 static void SendWheel(int delta) {
 	INPUT input = { 0 };
 	input.type = INPUT_MOUSE;
 	input.mi.dwFlags = MOUSEEVENTF_WHEEL;
-	input.mi.time = 0;
-
-	// --- 核心修改 ---
-	// 游戏通常只识别标准的 WHEEL_DELTA (120)
-	// 如果 delta 是正数，强制发送 120；如果是负数，强制发送 -120
-	// 这样可以兼容高精度鼠标的细微输入，确保游戏能识别为“一格”
-	if (delta > 0) {
-		input.mi.mouseData = (DWORD)WHEEL_DELTA; // 120
-	}
-	else {
-		input.mi.mouseData = (DWORD)(-WHEEL_DELTA); // -120
-	}
-	// ----------------
-
+	input.mi.mouseData = (DWORD)delta; // 正数为上滚，负数为下滚
 	SendInput(1, &input, sizeof(INPUT));
 }
 
-// Reset
 static void ResetAim() {
-	Output current = O.load();
-	if (current != None) {
-		Release((BYTE)current);
+	// 检查 U 账本
+	if (Aim.u.load()) {
+		Release('U'); // 默认 extra=0，Release 信号会经过 Pass 宏并把 Aim.u 置为 false
+	}
+	// 检查 R 账本
+	if (Aim.r.load()) {
+		Release(VK_RBUTTON); // 同理，重置 R 状态
 	}
 }
 
 // --- 进程检测(100ms) ---
 static void ActiveWindowMonitor() {
 	static DWORD lastPid = 0;
+	static bool lastState = false; // 记录上一次的状态
 	while (true) {
-		bool result = false;
+		bool currentResult = false;
 		HWND hwnd = GetForegroundWindow();
 		if (hwnd) {
 			DWORD pid;
@@ -172,47 +177,61 @@ static void ActiveWindowMonitor() {
 				if (hProc) {
 					WCHAR path[MAX_PATH];
 					if (K32GetProcessImageFileNameW(hProc, path, MAX_PATH)) {
-						result = (wcsstr(path, L"DeltaForceClient-Win64-Shipping.exe") != nullptr);
+						currentResult = (wcsstr(path, L"DeltaForceClient-Win64-Shipping.exe") != nullptr);
 					}
 					CloseHandle(hProc);
 				}
-				g_IsGameActive.store(result, std::memory_order_relaxed);
+				g_IsGameActive.store(currentResult, std::memory_order_relaxed);
+			}
+			else {
+				currentResult = g_IsGameActive.load(std::memory_order_relaxed);
 			}
 		}
 		else {
 			g_IsGameActive.store(false, std::memory_order_relaxed);
+			currentResult = false;
 			lastPid = 0;
 		}
+
+		// --- 联动点：状态从 激活 -> 非激活 的瞬间，立刻发消息隐藏 UI ---
+		if (lastState && !currentResult) {
+			if (g_hNotifyWnd) {
+				PostMessage(g_hNotifyWnd, WM_TIMER, 1, 0); // 发送计时器消息强制隐藏
+			}
+		}
+		lastState = currentResult;
+
 		Wait(100); // 100ms 巡检频率
 	}
 }
-
 // 2. 读接口：现在这个函数到处调用都不会卡了
 static inline bool IsTargetActive() {
-	//return 1; // 目标程序检测开关
+	return 1; // 目标程序检测开关
 	return g_IsGameActive.load(std::memory_order_relaxed);
 }
 
-// --- 【新增】模式切换提示 UI ---
+// --- 模式切换提示 UI ---
 
 static LRESULT CALLBACK NotifyWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 	if (msg == WM_PAINT) {
+		// --- 瞬间拦截：如果当前不在游戏前台，直接隐藏并不执行任何绘制 ---
+		if (!IsTargetActive()) {
+			ShowWindow(hwnd, SW_HIDE);
+			return 0;
+		}
+
 		PAINTSTRUCT ps;
 		HDC hdc = BeginPaint(hwnd, &ps);
-
 		RECT rect;
 		GetClientRect(hwnd, &rect);
 
-		// 绘制背景（透明色）
 		HBRUSH bg = CreateSolidBrush(RGB(1, 1, 1));
 		FillRect(hdc, &rect, bg);
 		DeleteObject(bg);
 
-		// 设置文字
 		SetBkMode(hdc, TRANSPARENT);
-		SetTextColor(hdc, RGB(200, 200, 200)); // 淡灰色，不起眼
+		SetTextColor(hdc, RGB(200, 200, 200));
 
-		// --- 修改点：字体高度由 22 改为 32，使其更大一点点 ---
 		HFONT hFont = CreateFontW(48, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_OUTLINE_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, VARIABLE_PITCH, L"Microsoft YaHei");
 		SelectObject(hdc, hFont);
 
@@ -223,44 +242,46 @@ static LRESULT CALLBACK NotifyWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
 		EndPaint(hwnd, &ps);
 		return 0;
 	}
+
+	if (msg == WM_USER + 100) { // 唤醒信号
+		if (IsTargetActive()) { // 只有在游戏内才允许唤醒
+			InvalidateRect(hwnd, NULL, TRUE);
+			ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+			SetTimer(hwnd, 1, 400, NULL); // 0.4秒后消失
+		}
+		return 0;
+	}
+
 	if (msg == WM_TIMER) {
-		DestroyWindow(hwnd);
+		ShowWindow(hwnd, SW_HIDE);
+		KillTimer(hwnd, 1);
 		return 0;
 	}
-	// 新增：处理销毁消息，确保线程消息循环结束
-	if (msg == WM_DESTROY) {
-		PostQuitMessage(0);
-		return 0;
-	}
+
 	return DefWindowProc(hwnd, msg, wParam, lParam);
 }
 
-static void ShowModeNotify() {
-	// 新增逻辑：在创建新窗口前，查找并关闭已存在的 Notify 窗口
-	// 这实现了“切换时上一个字幕提前消失”的功能
-	HWND hOld = FindWindowW(L"NotifyClass", L"Notify");
-	if (hOld) {
-		SendMessage(hOld, WM_CLOSE, 0, 0); // 发送关闭消息，SendMessage 会阻塞直到旧窗口处理完毕
-	}
+// --- 并行逻辑线程 (高速循环响应) ---
 
+// 提示窗口线程
+static void Thread_Notify_Manager() {
 	WNDCLASSEXW nwc = { sizeof(WNDCLASSEXW), CS_HREDRAW | CS_VREDRAW, NotifyWndProc, 0, 0, GetModuleHandle(NULL), NULL, NULL, NULL, NULL, L"NotifyClass", NULL };
 	RegisterClassExW(&nwc);
 
 	int sw = GetSystemMetrics(SM_CXSCREEN);
 	int width = 300;
-	int height = 60; // 配合大字体稍微增加高度
+	int height = 65;
 
-	HWND hwnd = CreateWindowExW(
+	g_hNotifyWnd = CreateWindowExW(
 		WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
 		L"NotifyClass", L"Notify",
-		WS_POPUP | WS_VISIBLE,
-		(sw / 2) - (width / 2), 240, // 稍微向下偏移，适配更大字体
+		WS_POPUP, // 初始不带 WS_VISIBLE
+		(sw / 2) - (width / 2), 240,
 		width, height,
 		NULL, NULL, GetModuleHandle(NULL), NULL
 	);
 
-	SetLayeredWindowAttributes(hwnd, RGB(1, 1, 1), 0, LWA_COLORKEY);
-	SetTimer(hwnd, 1, 400, NULL); // 0.4秒后消失
+	SetLayeredWindowAttributes(g_hNotifyWnd, RGB(1, 1, 1), 0, LWA_COLORKEY);
 
 	MSG msg;
 	while (GetMessage(&msg, NULL, 0, 0)) {
@@ -268,8 +289,6 @@ static void ShowModeNotify() {
 		DispatchMessage(&msg);
 	}
 }
-
-// --- 并行逻辑线程 (高速循环响应) ---
 
 // 【功能 1】 侧键2循环 (保持高精度自旋)
 static void Thread_XB2_Loop() {
@@ -354,7 +373,9 @@ static void Thread_MW_Loop() {
 				if (sDelta < 0) { // 下滚切换模式
 					ResetAim();
 					M = (M == Shoulder) ? Scope : Shoulder;
-					std::thread(ShowModeNotify).detach();
+					if (g_hNotifyWnd && IsWindow(g_hNotifyWnd)) {
+						PostMessage(g_hNotifyWnd, WM_USER + 100, 0, 0);
+					}
 				}
 				else if (sDelta > 0) { // 上滚执行 Press
 					if (!RB.load()) {
@@ -370,45 +391,30 @@ static void Thread_MW_Loop() {
 		}
 	}
 }
+
 // 【功能 2/6/7】 鼠标右键复杂逻辑
 static void Thread_RB_Loop() {
 	while (WaitForSingleObject(RBevent, INFINITE) == WAIT_OBJECT_0) {
-		bool currentRB = RB.load();
-
-		if (currentRB) {
-			// 按下逻辑：必须在激活时才执行
-			if (IsTargetActive()) {
-				Press('H');
-				ULONGLONG currentTicks = GetTickCount64();
-				if (!XB1 && CT64 != 0 && (currentTicks - CT64 < 4000)) {
-					Tap(VK_OEM_COMMA);
-					CT64 = 0;
-				}
-				ResetAim();
-				if (M == Shoulder) {
-					Press('U');
-					std::thread([]() {
-						Wait(10);
-						SendMouse(VK_RBUTTON, true);
-						Wait(5);
-						SendMouse(VK_RBUTTON, false);
-						}).detach();
-				}
-				else{
-					Press(VK_RBUTTON);
-				}
+		if (RB.load()) {
+			Press('H');
+			// ... CT64 处理逻辑 ...
+			ResetAim();
+			if (M == Shoulder) {
+				Press('U');
+				// 核心修改：利用 Tap 实现瞬间点击，Hook 会自动处理 g_Out
+				std::thread([]() {
+					Wait(10);
+					Tap(VK_RBUTTON, AIM_SKIP);//传入 AIM_SKIP。Hook 看到这个右键会放行，但不会修改 Aim 账本
+					}).detach();
+			}
+			else {
+				Press(VK_RBUTTON);
 			}
 		}
 		else {
-			// 抬起逻辑：无论是否在游戏内，抬起物理右键必须同步释放 H
-			// 这里的 IsTargetActive() 判定可以去掉，因为 Release 是安全的
 			Release('H');
-			if (S) {
-				S = false;
-			}
-			else {
-				ResetAim();
-			}
+			if (S) S = false;
+			else ResetAim();
 		}
 	}
 }
@@ -418,6 +424,7 @@ static void Thread_RB_Loop() {
 static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 	if (nCode == HC_ACTION) {
 		KBDLLHOOKSTRUCT* k = (KBDLLHOOKSTRUCT*)lParam;
+		// --- 核心修改：在 return Pass 前记录影子账本 ---
 		if (k->flags & LLKHF_INJECTED) return Pass;
 
 		bool state = (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN);
@@ -476,45 +483,57 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 
 		case VK_CAPITAL: { // 物理 Caps 键
 			static bool pressedN = false;
+			static bool pressedCtrl = false; // 对应原本的 isMappingCtrl，记录本次 Caps 物理按下是否转换成了模拟 Ctrl
 			if (state) {
-				if (XB1 && isActive) {
-					Press('N');
-					pressedN = true;
-					return 1;
+				if (isActive) {
+					if (XB1) {
+						Press('N');
+						pressedN = true;
+						return 1;
+					}
+					// 【新增】放行逻辑：Caps 变 Ctrl
+					else {
+						Press(VK_LCONTROL);
+						pressedCtrl = true;
+						return 1;
+					}// 必须拦截原始 Caps，否则会触发大写锁定
 				}
-				// 【新增】放行逻辑：Caps 变 Ctrl
-				else {
-					Press(VK_LCONTROL);
-					return 1;
-				}// 必须拦截原始 Caps，否则会触发大写锁定
+				else return Pass; // 非前台直接放行原始 Caps
 			}
 			else {
+				// 抬起逻辑：只要标志位为真，说明之前在游戏内触发了映射，必须强制释放
 				if (pressedN) {
 					Release('N');
 					pressedN = false;
 					return 1;
 				}
-				// 【新增】放行逻辑：释放 Ctrl
-				else {
+				if (pressedCtrl) {
 					Release(VK_LCONTROL);
+					pressedCtrl = false;
 					return 1;
 				}
+				else return Pass;
 			}
 		}
 
 		case VK_LCONTROL: { // 物理 Ctrl 键
 			static bool pressedM = false;
+			static bool pressedCaps = false; // 记录本次 Ctrl 物理按下是否转换成了模拟 Caps
 			if (state) {
-				if (XB1 && isActive) {
-					Press('M');
-					pressedM = true;
-					return 1;
+				if (isActive) {
+					if (XB1) {
+						Press('M');
+						pressedM = true;
+						return 1;
+					}
+					// 【新增】放行逻辑：Ctrl 变 Caps
+					else {
+						Press(VK_CAPITAL);
+						pressedCaps = true;
+						return 1;
+					}
 				}
-				// 【新增】放行逻辑：Ctrl 变 Caps
-				else {
-					Press(VK_CAPITAL);
-					return 1;
-				}
+				else return Pass; // 非前台直接放行原始 Ctrl
 			}
 			else {
 				if (pressedM) {
@@ -522,11 +541,12 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 					pressedM = false;
 					return 1;
 				}
-				// 【新增】放行逻辑：释放 Caps
-				else {
+				if (pressedCaps) {
 					Release(VK_CAPITAL);
+					pressedCaps = false;
 					return 1;
 				}
+				else return Pass;
 			}
 		}
 
@@ -570,7 +590,7 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 			}
 		}
 
-			// 【功能 7】 战术 C 键
+				   // 【功能 7】 战术 C 键
 		case 'C':
 			if (isActive && !XB1) {
 				if (state) CT64 = GetTickCount64();
@@ -579,14 +599,14 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 			break;
 		}
 	}
-	return Pass;
+	return CallNextHookEx(NULL, nCode, wParam, lParam);
 }
 
 static LRESULT CALLBACK MouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
 	if (nCode == HC_ACTION) {
 		MSLLHOOKSTRUCT* m = (MSLLHOOKSTRUCT*)lParam;
 
-		// 识别脚本输出：防止脚本模拟点击触发递归死循环
+		// --- 核心修改：记录鼠标逻辑输出状态 ---
 		if (m->flags & LLMHF_INJECTED) return Pass;
 
 		bool isActive = IsTargetActive();
@@ -654,14 +674,14 @@ static LRESULT CALLBACK MouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
 		case WM_MOUSEWHEEL:
 			if (isActive) {
 				short rDelta = (short)HIWORD(m->mouseData);
-				MW = (int)rDelta;
+				MW.fetch_add(rDelta);
 				SetEvent(MWevent);
 				return 1;
 			}
 			break;
 		}
 	}
-	return Pass;
+	return CallNextHookEx(NULL, nCode, wParam, lParam);
 }
 
 // --- 【功能 10】 准星 UI 绘制 (对游戏帧率影响极小) ---
@@ -853,21 +873,26 @@ static void FreezeAllSubThreads() {
 	CloseHandle(hSnap);
 }
 
-// 释放所有按下的按键，防止卡键
-static void ReleaseAll() {
-	// 1. 鼠标模拟输出
-	Release(VK_LBUTTON);
-	Release(VK_RBUTTON);
-
-	// 2. 脚本中所有通过 Press/Tap 产生的逻辑输出键位
-	// 列表涵盖：肩射(U), 状态(H), 移动叠加(A,D), 侧键映射(N,M,.,), 连招(1,2,3,4,L), 自动(F,Space)
-	const BYTE simulatedKeys[] = {
+static void ClaenAll() {
+	const BYTE keys[] = {
 		'U', 'H', 'A', 'D', 'N', 'M', VK_OEM_PERIOD, VK_OEM_COMMA,
-		'1', '2', '3', '4', 'L', 'F', VK_SPACE
+		'1', '2', '3', '4', 'L', 'F', VK_SPACE,
+		VK_LCONTROL, VK_CAPITAL, VK_RBUTTON, VK_LBUTTON
 	};
+	for (BYTE vk : keys) {
+		bool logical = g_Out[vk].load();
+		bool physical = (GetAsyncKeyState(vk) & 0x8000) != 0;
 
-	for (BYTE vk : simulatedKeys) {
-		Release(vk);
+		if (logical && !physical) {
+			if (vk == VK_RBUTTON || vk == VK_LBUTTON) SendMouse(vk, false);
+			else SendKey(vk, false);
+		}
+		else if (!logical && physical) {
+			// 这部分是你要求的：物理按了但逻辑没按（被拦截了），补发按下
+			if (vk == VK_RBUTTON || vk == VK_LBUTTON) SendMouse(vk, true);
+			else SendKey(vk, true);
+		}
+		g_Out[vk] = false;
 	}
 }
 
@@ -894,6 +919,7 @@ int WINAPI WinMain(
 	g_mainThreadId = GetCurrentThreadId();
 
 	// 启动线程
+	std::thread(Thread_Notify_Manager).detach();
 	std::thread(Thread_XB2_Loop).detach();
 	std::thread(Thread_F_Loop).detach();
 	std::thread(Thread_Space_Loop).detach();
@@ -916,8 +942,8 @@ int WINAPI WinMain(
 
 	// 程序退出前的清理工作
 	FreezeAllSubThreads();
-	ReleaseAll();
-	UnhookWindowsHookEx(kHook);UnhookWindowsHookEx(mHook);
+	ClaenAll();
+	UnhookWindowsHookEx(kHook); UnhookWindowsHookEx(mHook);
 
 	timeEndPeriod(1); // 记得恢复系统定时器精度
 
