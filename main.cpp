@@ -197,7 +197,7 @@ static void ActiveWindowMonitor() {
 }
 // 2. 读接口：现在这个函数到处调用都不会卡了
 static inline bool IsTargetActive() {
-	return 1; // 目标程序检测开关
+	//return 1; // 目标程序检测开关
 	return g_IsGameActive.load(std::memory_order_relaxed);
 }
 
@@ -408,282 +408,184 @@ static void Thread_RB_Loop() {
 // --- Hook 回调逻辑 ---
 
 static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
-	if (nCode == HC_ACTION) {
-		KBDLLHOOKSTRUCT* k = (KBDLLHOOKSTRUCT*)lParam;
-		// --- 核心修改：在 return Pass 前记录影子账本 ---
-		if (k->flags & LLKHF_INJECTED) return Pass;
+	if (nCode != HC_ACTION) return Pass;
 
-		bool state = (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN);
-		DWORD vk = k->vkCode;
+	KBDLLHOOKSTRUCT* k = (KBDLLHOOKSTRUCT*)lParam;
+	// --- 核心修改：在 return Pass 前记录影子账本 ---
+	if (k->flags & LLKHF_INJECTED) return Pass;
 
-		bool isActive = IsTargetActive();
+	bool state = (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN);
+	DWORD vk = k->vkCode;
+	bool isActive = IsTargetActive();
 
-		// --- 全局同步逻辑 (无论是否在游戏内，确保状态正确) ---
-		// 这里必须保持不受 isActive 影响，物理键松开，变量必须同步，后台循环才能自然熄火
-		switch (vk) {
-		case 'F':
-			KF = state;
-			SetEvent(Fevent);
-			break;
-		case VK_SPACE:
-			KS = state;
-			SetEvent(SPACEevent);
-			break;
-		}
+	// --- 全局同步逻辑 (无论是否在游戏内，确保状态正确) ---
+	switch (vk) {
+	case 'F':     KF = state; SetEvent(Fevent); break;
+	case VK_SPACE: KS = state; SetEvent(SPACEevent); break;
+	}
 
-		// --- 业务逻辑处理 ---
-		switch (vk) {
-			// 【功能 5/8/9】 Q/E 叠加 A/D
-		case 'Q':
-			if (state) {
-				if (isActive) Press('A'); // 按下仅在游戏内生效
-			}
-			else {
-				Release('A'); // 松开不受 isActive 影响，确保复位
-			}
-			break;
-		case 'E':
-			if (state) {
-				if (isActive) Press('D'); // 按下仅在游戏内生效
-			}
-			else {
-				Release('D'); // 松开不受 isActive 影响，确保复位
-			}
-			break;
+	// --- 业务逻辑处理 ---
+	switch (vk) {
+		// 【Q/E 叠加 A/D】
+	case 'Q':
+		if (state && isActive) Press('A');
+		else if (!state) Release('A'); // 松开必须执行，确保复位
+		break;
 
-			// 【功能 1】 武器槽位
-		case '1': if (state && isActive) Num = 1; break;
-		case '2': if (state && isActive) Num = 2; break;
-		case '4': if (state && isActive) Num = 4; break;
+	case 'E':
+		if (state && isActive) Press('D');
+		else if (!state) Release('D');
+		break;
 
-			// 【功能 3/4】 F 键与空格拦截
-		case 'F':
-			if (isActive) return XB1 ? Pass : 1; // 仅在前台时拦截
-			break;
-		case VK_SPACE:
-			if (isActive) return 1; // 仅在前台时拦截
-			break;
+		// 【武器槽位】
+	case '1': case '2': case '4':
+		if (state && isActive) Num = (vk == '1' ? 1 : (vk == '2' ? 2 : 4));
+		break;
 
+		// 【F 与 空格拦截】
+	case 'F':
+		if (isActive && !XB1) return 1;
+		break;
 
-			// --- 功能 5/8/9：侧键 1 (XB1) 组合映射 (带身份互换逻辑) ---
+	case VK_SPACE:
+		if (isActive) return 1;
+		break;
 
-		case VK_CAPITAL: { // 物理 Caps 键
-			static bool pressedN = false;
-			static bool pressedCtrl = false; // 对应原本的 isMappingCtrl，记录本次 Caps 物理按下是否转换成了模拟 Ctrl
-			if (state) {
-				if (isActive) {
-					if (XB1) {
-						Press('N');
-						pressedN = true;
-						return 1;
-					}
-					// 【新增】放行逻辑：Caps 变 Ctrl
-					else {
-						Press(VK_LCONTROL);
-						pressedCtrl = true;
-						return 1;
-					}// 必须拦截原始 Caps，否则会触发大写锁定
-				}
-				else return Pass; // 非前台直接放行原始 Caps
-			}
-			else {
-				// 抬起逻辑：只要标志位为真，说明之前在游戏内触发了映射，必须强制释放
-				if (pressedN) {
-					Release('N');
-					pressedN = false;
-					return 1;
-				}
-				if (pressedCtrl) {
-					Release(VK_LCONTROL);
-					pressedCtrl = false;
-					return 1;
-				}
-				else return Pass;
-			}
-		}
+		// 【Caps/Ctrl/X/Tab 映射逻辑】
+	case VK_CAPITAL:
+	case VK_LCONTROL:
+	case 'X':
+	case VK_TAB: {
+		static bool pN = false, pCtrl = false, pM = false, pCaps = false, pDot = false, pSemi = false;
 
-		case VK_LCONTROL: { // 物理 Ctrl 键
-			static bool pressedM = false;
-			static bool pressedCaps = false; // 记录本次 Ctrl 物理按下是否转换成了模拟 Caps
-			if (state) {
-				if (isActive) {
-					if (XB1) {
-						Press('M');
-						pressedM = true;
-						return 1;
-					}
-					// 【新增】放行逻辑：Ctrl 变 Caps
-					else {
-						Press(VK_CAPITAL);
-						pressedCaps = true;
-						return 1;
-					}
-				}
-				else return Pass; // 非前台直接放行原始 Ctrl
-			}
-			else {
-				if (pressedM) {
-					Release('M');
-					pressedM = false;
-					return 1;
-				}
-				if (pressedCaps) {
-					Release(VK_CAPITAL);
-					pressedCaps = false;
-					return 1;
-				}
-				else return Pass;
-			}
-		}
-
-		case 'X': { // X -> . (逻辑保持不变，不满足条件则放行原键)
-			static bool pressedDot = false;
-			if (state) {
-				if (XB1 && isActive) {
-					Press(VK_OEM_PERIOD);
-					pressedDot = true;
-					return 1;
-				}
-				else return Pass;
-			}
-			else {
-				if (pressedDot) {
-					Release(VK_OEM_PERIOD);
-					pressedDot = false;
-					return 1;
-				}
-				else return Pass;
-			}
-		}
-
-		case VK_TAB: { // Tab -> ; (逻辑保持不变)
-			static bool pressedSemicolon = false;
-			if (state) {
-				if (XB1 && isActive) {
-					Press(VK_OEM_1);
-					pressedSemicolon = true;
-					return 1;
-				}
-				else return Pass;
-			}
-			else {
-				if (pressedSemicolon) {
-					Release(VK_OEM_1);
-					pressedSemicolon = false;
-					return 1;
-				}
-				else return Pass;
-			}
-		}
-
-				   // 【功能 7】 战术 C 键
-		case 'C':
-			if (isActive && !XB1) {
-				if (state) CT64 = GetTickCount64();
+		if (state && isActive) {
+			if (vk == VK_CAPITAL) {
+				if (XB1) { Press('N'); pN = true; }
+				else { Press(VK_LCONTROL); pCtrl = true; }
 				return 1;
 			}
-			break;
+			if (vk == VK_LCONTROL) {
+				if (XB1) { Press('M'); pM = true; }
+				else { Press(VK_CAPITAL); pCaps = true; }
+				return 1;
+			}
+			if (vk == 'X' && XB1) { Press(VK_OEM_PERIOD); pDot = true; return 1; }
+			if (vk == VK_TAB && XB1) { Press(VK_OEM_1); pSemi = true; return 1; }
 		}
+		else if (!state) { // 抬起逻辑：只要之前标记过按下，就必须拦截并释放
+			if (pN) { Release('N'); pN = false; return 1; }
+			if (pCtrl) { Release(VK_LCONTROL); pCtrl = false; return 1; }
+			if (pM) { Release('M'); pM = false; return 1; }
+			if (pCaps) { Release(VK_CAPITAL); pCaps = false; return 1; }
+			if (pDot) { Release(VK_OEM_PERIOD); pDot = false; return 1; }
+			if (pSemi) { Release(VK_OEM_1); pSemi = false; return 1; }
+		}
+		break; // 其他情况（如非活跃状态按下）统一放行
 	}
+
+			   // 【战术 C 键】
+	case 'C':
+		if (isActive && !XB1) {
+			if (state) CT64 = GetTickCount64();
+			return 1;
+		}
+		break;
+	}
+
 	return Pass;
 }
 
 static LRESULT CALLBACK MouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
-	if (nCode == HC_ACTION) {
-		MSLLHOOKSTRUCT* m = (MSLLHOOKSTRUCT*)lParam;
+	if (nCode != HC_ACTION) return Pass;
 
-		// --- 核心修改：记录鼠标逻辑输出状态 ---
-		if (m->flags & LLMHF_INJECTED) return Pass;
+	MSLLHOOKSTRUCT* m = (MSLLHOOKSTRUCT*)lParam;
 
-		bool isActive = IsTargetActive();
+	// --- 核心修改：记录鼠标逻辑输出状态 ---
+	if (m->flags & LLMHF_INJECTED) return Pass;
 
-		// --- 鼠标按键处理 ---
-		switch (wParam) {
+	bool isActive = IsTargetActive();
 
-			// --- 侧键 1 & 2 处理 (XB1 组合键开关 / XB2 连招触发) ---
-		case WM_XBUTTONDOWN:
-		case WM_XBUTTONUP:
-		{
-			bool state = (wParam == WM_XBUTTONDOWN);
-			int xNum = HIWORD(m->mouseData);
+	// --- 鼠标按键处理 ---
+	switch (wParam) {
 
-			if (xNum == 1) {
-				// 侧键 1 处理
-				if (state) {
-					if (isActive) {
-						XB1 = true;
-						return 1; // 在游戏内按下：拦截物理信号，仅触发内部开关
-					}
-				}
-				else {
-					XB1 = false; // 松开：同步状态
-					if (isActive) return 1; // 在游戏内松开：拦截物理信号
-				}
-				return Pass; // 非游戏内，放行原键位逻辑
+		// --- 侧键 1 & 2 处理 (XB1 组合键开关 / XB2 连招触发) ---
+	case WM_XBUTTONDOWN:
+	case WM_XBUTTONUP:
+	{
+		bool state = (wParam == WM_XBUTTONDOWN);
+		int xNum = HIWORD(m->mouseData);
+
+		if (xNum == 1) {
+			// 侧键 1 处理
+			if (state && isActive) {
+				XB1 = true;
+			}
+			else if (!state) {
+				XB1 = false; // 松开：同步状态
 			}
 
-			if (xNum == 2) {
-				// 侧键 2 处理
-				if (state) {
-					if (isActive) {
-						XB2 = true;
-						SetEvent(XB2event); // 唤醒连招线程
-						return 1; // 在游戏内按下：拦截
-					}
-				}
-				else {
-					XB2 = false; // 松开：让线程通过 while 判断熄火
-					SetEvent(XB2event); // 再次触发事件确保线程从 Wait 中醒来检查 XB2 状态
-					if (isActive) return 1; // 在游戏内松开：拦截
-				}
-				return Pass;
-			}
-			break;
+			if (isActive) return 1; // 在游戏内：拦截物理信号（无论按下还是松开）
+			break; // 非游戏内，跳出 switch 执行最后的 Pass
 		}
 
-		// --- 右键处理：同步状态并通知 Thread_RB_Loop ---
-		case WM_RBUTTONDOWN:
-		case WM_RBUTTONUP:
-		{
-			bool state = (wParam == WM_RBUTTONDOWN);
-
-			// 只有在 isActive 时才允许“按下”逻辑生效
-			// 但“松开”逻辑必须始终同步，以确保 Thread_RB_Loop 能够执行 Release('H') 等收尾
+		if (xNum == 2) {
+			// 侧键 2 处理
 			if (state) {
 				if (isActive) {
-					RB = true;
-					SetEvent(RBevent);
-					return 1; // 拦截物理按下
+					XB2 = true;
+					SetEvent(XB2event); // 唤醒连招线程
 				}
 			}
 			else {
-				RB = false;
-				SetEvent(RBevent);
-				// 如果之前按下被拦截了（RB为真时切走的），松开时也需要拦截或处理
-				// 为了优雅，如果是在游戏内松开，我们返回 1 保持对称
-				if (isActive) return 1;
+				XB2 = false; // 松开：让线程通过 while 判断熄火
+				SetEvent(XB2event); // 再次触发事件确保线程从 Wait 中醒来检查 XB2 状态
 			}
-			break;
-		}
 
-		// --- 滚轮处理 ---
-		case WM_MOUSEWHEEL:
-		{
-			if (isActive) {
-				if (XB1.load()) {
-					return Pass;
-				}
-				else {
-					short rDelta = (short)HIWORD(m->mouseData);
-					MW = (int)rDelta;
-					SetEvent(MWevent);
-					return 1;
-				}
-			}
+			if (isActive) return 1; // 在游戏内：拦截物理信号
 			break;
 		}
-		}
+		break;
 	}
+
+	// --- 右键处理：同步状态并通知 Thread_RB_Loop ---
+	case WM_RBUTTONDOWN:
+	case WM_RBUTTONUP:
+	{
+		bool state = (wParam == WM_RBUTTONDOWN);
+
+		// 只有在 isActive 时才允许“按下”逻辑生效
+		// 但“松开”逻辑必须始终同步，以确保 Thread_RB_Loop 能够执行 Release('H') 等收尾
+		if (state) {
+			if (isActive) {
+				RB = true;
+				SetEvent(RBevent);
+				return 1; // 拦截物理按下
+			}
+		}
+		else {
+			RB = false;
+			SetEvent(RBevent);
+			if (isActive) return 1; // 在游戏内松开：拦截
+		}
+		break;
+	}
+
+	// --- 滚轮处理 ---
+	case WM_MOUSEWHEEL:
+	{
+		if (isActive) {
+			if (!XB1.load()) {
+				short rDelta = (short)HIWORD(m->mouseData);
+				MW = (int)rDelta;
+				SetEvent(MWevent);
+				return 1;
+			}
+			// 如果 XB1 为 true，不执行上述逻辑，直接跳出 switch 执行 Pass
+		}
+		break;
+	}
+	}
+
 	return Pass;
 }
 
@@ -780,9 +682,9 @@ static void CreateCrosshair() {
 	int sw = GetSystemMetrics(SM_CXSCREEN);
 	int sh = GetSystemMetrics(SM_CYSCREEN);
 
-	// --- 修改点：将 40 开为 100 ---
+	// --- 修改点：将 40 开为 101 ---
 	// 线条 34px + 间距 6px = 40px，两侧总计 80px+，所以窗口必须大于 80。
-	int windowSize = 100;
+	int windowSize = 101;
 
 	// --- 修改点：添加 WS_EX_NOACTIVATE 防止窗口创建时抢夺焦点导致鼠标位置重置 ---
 	HWND hwnd = CreateWindowExW(
