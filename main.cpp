@@ -201,11 +201,13 @@ static inline bool IsTargetActive() {
 	return g_IsGameActive.load(std::memory_order_relaxed);
 }
 
-// --- 模式切换提示 UI ---
+// --- 消息提示 UI ---
 
 static LRESULT CALLBACK NotifyWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+	// 关键：使用静态变量保存当前要显示的文字内容
+	static std::wstring currentText = L"";
+
 	if (msg == WM_PAINT) {
-		// --- 瞬间拦截：如果当前不在游戏前台，直接隐藏并不执行任何绘制 ---
 		if (!IsTargetActive()) {
 			ShowWindow(hwnd, SW_HIDE);
 			return 0;
@@ -221,26 +223,35 @@ static LRESULT CALLBACK NotifyWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
 		DeleteObject(bg);
 
 		SetBkMode(hdc, TRANSPARENT);
-		SetTextColor(hdc, RGB(200, 200, 200));
+
+		// 逻辑：如果是爆闪终止，可以使用红色提示，否则使用灰色
+		if (currentText == L"爆闪终止") {
+			SetTextColor(hdc, RGB(255, 80, 80)); // 醒目的淡红色
+		}
+		else {
+			SetTextColor(hdc, RGB(200, 200, 200)); // 默认灰色
+		}
 
 		HFONT hFont = CreateFontW(48, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_OUTLINE_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, VARIABLE_PITCH, L"Microsoft YaHei");
 		SelectObject(hdc, hFont);
 
-		std::wstring text = (M == Shoulder) ? L"肩射模式" : L"倍镜模式";
-		DrawTextW(hdc, text.c_str(), -1, &rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+		DrawTextW(hdc, currentText.c_str(), -1, &rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
 		DeleteObject(hFont);
 		EndPaint(hwnd, &ps);
 		return 0;
 	}
 
-	if (msg == WM_USER + 100) { // 唤醒信号
-		if (IsTargetActive()) { // 只有在游戏内才允许唤醒
-			InvalidateRect(hwnd, NULL, TRUE);
-			ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-			SetTimer(hwnd, 1, 400, NULL); // 0.4秒后消失
-		}
-		return 0;
+	// 处理“模式切换”消息
+	if (msg == WM_USER + 100) {
+		currentText = (M == Shoulder) ? L"肩射模式" : L"倍镜模式";
+		goto REFRESH_UI;
+	}
+
+	// 新增：处理“爆闪终止”消息
+	if (msg == WM_USER + 101) {
+		currentText = L"爆闪终止";
+		goto REFRESH_UI;
 	}
 
 	if (msg == WM_TIMER) {
@@ -250,6 +261,14 @@ static LRESULT CALLBACK NotifyWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
 	}
 
 	return DefWindowProc(hwnd, msg, wParam, lParam);
+
+REFRESH_UI:
+	if (IsTargetActive()) {
+		InvalidateRect(hwnd, NULL, TRUE);
+		ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+		SetTimer(hwnd, 1, 400, NULL); // 0.4秒后消失
+	}
+	return 0;
 }
 
 // --- 并行逻辑线程 (高速循环响应) ---
@@ -378,45 +397,54 @@ static void Thread_MW_Loop() {
 	}
 }
 
-// 【功能 2/6/7/C】 整合后的右键与 C 连携逻辑
+// 【功能 2/6/7/C】 右键逻辑
 static void Thread_RB_Loop() {
-	while (WaitForSingleObject(RBevent, INFINITE) == WAIT_OBJECT_0) {
-		bool isActive = IsTargetActive();
-		if (!isActive) continue;
+	while (true) {
+		// 修改点：WaitForSingleObject 增加 100ms 超时，不再死等信号
+		DWORD result = WaitForSingleObject(RBevent, 100);
 
+		bool isActive = IsTargetActive();
 		ULONGLONG now = GetTickCount64();
 		ULONGLONG lastC = CT64.load(std::memory_order_relaxed);
-		bool isAiming = (Aim.u.load() || Aim.r.load());
 
-		// --- 逻辑分支 1：C 键触发的连携 (先右后C) ---
-		// 如果当前正在开镜，且 C 时间戳刚更新（比如在 50ms 内）
-		if (isAiming && lastC > 0 && (now - lastC < 50)) {
-			Tap(VK_OEM_COMMA);
-			CT64.store(0); // 消耗掉
+		// --- 核心逻辑：检测爆闪倒计时是否结束 ---
+		if (lastC > 0 && (now - lastC >= 4000)) {
+			CT64.store(0); // 清空计时，防止重复触发
+			if (isActive && g_hNotifyWnd) {
+				// 发送新增的消息号 101
+				PostMessage(g_hNotifyWnd, WM_USER + 101, 0, 0);
+			}
 		}
 
-		// --- 逻辑分支 2：右键按下触发 (含先C后右) ---
+		// 如果不是由 RBevent 触发（即 100ms 自动醒来），则跳过下方的按键逻辑判断
+		if (result != WAIT_OBJECT_0) continue;
+
+		if (!isActive) continue;
+
+		bool isAiming = (Aim.u.load() || Aim.r.load());
+
+		// 逻辑分支 1：C 键触发的连携 (先右后C)
+		if (isAiming && lastC > 0 && (now - lastC < 50)) {
+			Tap(VK_OEM_COMMA);
+			CT64.store(0);
+		}
+
+		// 逻辑分支 2：右键按下触发
 		if (RB.load()) {
-			// 判定：如果是“先 C 后右”（4秒窗口期）
 			if (lastC > 0 && (now - lastC <= 4000)) {
 				Tap(VK_OEM_COMMA);
-				CT64.store(0); // 消耗掉
+				CT64.store(0);
 			}
-
 			Press('H');
 			ResetAim();
 			if (M == Shoulder) {
 				Press('U');
-				std::thread([]() {
-					Wait(10);
-					Tap(VK_RBUTTON, AIM_SKIP);
-					}).detach();
+				std::thread([]() { Wait(10); Tap(VK_RBUTTON, AIM_SKIP); }).detach();
 			}
 			else {
 				Press(VK_RBUTTON);
 			}
 		}
-		// --- 逻辑分支 3：右键抬起 ---
 		else {
 			Release('H');
 			if (S) S = false;
@@ -424,7 +452,6 @@ static void Thread_RB_Loop() {
 		}
 	}
 }
-
 // --- Hook 回调逻辑 ---
 
 static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
