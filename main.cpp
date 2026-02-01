@@ -378,18 +378,29 @@ static void Thread_MW_Loop() {
 	}
 }
 
-// 【功能 2/6/7】 鼠标右键复杂逻辑
+// 【功能 2/6/7/C】 整合后的右键与 C 连携逻辑
 static void Thread_RB_Loop() {
 	while (WaitForSingleObject(RBevent, INFINITE) == WAIT_OBJECT_0) {
+		bool isActive = IsTargetActive();
+		if (!isActive) continue;
+
+		ULONGLONG now = GetTickCount64();
+		ULONGLONG lastC = CT64.load(std::memory_order_relaxed);
+		bool isAiming = (Aim.u.load() || Aim.r.load());
+
+		// --- 逻辑分支 1：C 键触发的连携 (先右后C) ---
+		// 如果当前正在开镜，且 C 时间戳刚更新（比如在 50ms 内）
+		if (isAiming && lastC > 0 && (now - lastC < 50)) {
+			Tap(VK_OEM_COMMA);
+			CT64.store(0); // 消耗掉
+		}
+
+		// --- 逻辑分支 2：右键按下触发 (含先C后右) ---
 		if (RB.load()) {
-			// --- 新增：C 键联动判定 ---
-			ULONGLONG lastC = CT64.load(std::memory_order_relaxed);
-			if (lastC > 0) {
-				ULONGLONG now = GetTickCount64();
-				if (now - lastC <= 4000) { // 4000ms 窗口期
-					Tap(VK_OEM_COMMA);    // 执行 "," 键动作
-					CT64.store(0);         // 消耗掉计次，防止 4 秒内二次右键重复触发
-				}
+			// 判定：如果是“先 C 后右”（4秒窗口期）
+			if (lastC > 0 && (now - lastC <= 4000)) {
+				Tap(VK_OEM_COMMA);
+				CT64.store(0); // 消耗掉
 			}
 
 			Press('H');
@@ -405,6 +416,7 @@ static void Thread_RB_Loop() {
 				Press(VK_RBUTTON);
 			}
 		}
+		// --- 逻辑分支 3：右键抬起 ---
 		else {
 			Release('H');
 			if (S) S = false;
@@ -494,10 +506,13 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 			   // 【战术 C 键】
 	case 'C':
 		if (isActive && !XB1) {
-			if (state) { // 仅在物理按下的一瞬间刷新时间戳
+			if (state) {
+				// 1. 记录 C 键按下时间戳
 				CT64.store(GetTickCount64(), std::memory_order_relaxed);
+				// 2. 借用 RBevent 唤醒处理线程
+				SetEvent(RBevent);
 			}
-			return 1; // 彻底拦截 C 键信号，不传给游戏
+			return 1; // 拦截物理信号
 		}
 		break;
 	}
