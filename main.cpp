@@ -264,9 +264,14 @@ static LRESULT CALLBACK NotifyWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
 
 REFRESH_UI:
 	if (IsTargetActive()) {
+		// 根据文字内容决定透明度 (0-255)
+		// 255 是不透明，180 约等于 70% 透明度
+		BYTE alpha = (currentText == L"爆闪终止") ? 180 : 255;
+		SetLayeredWindowAttributes(hwnd, RGB(1, 1, 1), alpha, LWA_COLORKEY | LWA_ALPHA);
+
 		InvalidateRect(hwnd, NULL, TRUE);
 		ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-		SetTimer(hwnd, 1, 400, NULL); // 0.4秒后消失
+		SetTimer(hwnd, 1, 400, NULL);
 	}
 	return 0;
 }
@@ -291,7 +296,7 @@ static void Thread_Notify_Manager() {
 		NULL, NULL, GetModuleHandle(NULL), NULL
 	);
 
-	SetLayeredWindowAttributes(g_hNotifyWnd, RGB(1, 1, 1), 0, LWA_COLORKEY);
+	SetLayeredWindowAttributes(g_hNotifyWnd, RGB(1, 1, 1), 255, LWA_COLORKEY | LWA_ALPHA);
 
 	MSG msg;
 	while (GetMessage(&msg, NULL, 0, 0)) {
@@ -329,7 +334,7 @@ static void Thread_XB2_Loop() {
 					if (!XB2 || !IsTargetActive()) goto BREAK_LOOP;
 
 					auto now = std::chrono::steady_clock::now();
-					if (std::chrono::duration_cast<std::chrono::milliseconds>(now - start_2).count() >= 18) break;
+					if (std::chrono::duration_cast<std::chrono::milliseconds>(now - start_2).count() >= 40) break;
 					std::this_thread::yield();
 				}
 
@@ -408,7 +413,7 @@ static void Thread_RB_Loop() {
 		ULONGLONG lastC = CT64.load(std::memory_order_relaxed);
 
 		// --- 核心逻辑：检测爆闪倒计时是否结束 ---
-		if (lastC > 0 && (now - lastC >= 4000)) {
+		if (lastC > 0 && (now - lastC >= 8000)) {
 			CT64.store(0); // 清空计时，防止重复触发
 			if (isActive && g_hNotifyWnd) {
 				// 发送新增的消息号 101
@@ -431,7 +436,7 @@ static void Thread_RB_Loop() {
 
 		// 逻辑分支 2：右键按下触发
 		if (RB.load()) {
-			if (lastC > 0 && (now - lastC <= 4000)) {
+			if (lastC > 0 && (now - lastC <= 8000)) {
 				Tap(VK_OEM_COMMA);
 				CT64.store(0);
 			}
@@ -534,12 +539,20 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 	case 'C':
 		if (isActive && !XB1) {
 			if (state) {
-				// 1. 记录 C 键按下时间戳
+				// 如果当前已经在计时(说明是重复按下)
+				if (CT64.load() > 0) {
+					CT64.store(0); // 销毁计时器
+					if (g_hNotifyWnd) {
+						PostMessage(g_hNotifyWnd, WM_USER + 101, 0, 0); // 发送“爆闪终止”
+					}
+				}
+				else {
+					// 正常开始计时
 				CT64.store(GetTickCount64(), std::memory_order_relaxed);
-				// 2. 借用 RBevent 唤醒处理线程
-				SetEvent(RBevent);
+					SetEvent(RBevent); // 唤醒处理线程
+				}
 			}
-			return 1; // 拦截物理信号
+			return 1;
 		}
 		break;
 	}
