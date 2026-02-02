@@ -312,23 +312,23 @@ static void Thread_XB2_Loop() {
 		if (XB2 && IsTargetActive()) {
 			BYTE k = (BYTE)('0' + Num.load());
 
-			do {
+			do { // 循环长度约为192ms
 				Tap('L');
 
-				// 128ms 高精度自旋
+				// 140ms 高精度自旋
 				auto start_1 = std::chrono::steady_clock::now();
 				while (true) {
 					// 只要切屏，g_IsGameActive 会变假，这里立刻跳出
 					if (!XB2 || !IsTargetActive()) goto BREAK_LOOP;
 
 					auto now = std::chrono::steady_clock::now();
-					if (std::chrono::duration_cast<std::chrono::milliseconds>(now - start_1).count() >= 128) break;
+					if (std::chrono::duration_cast<std::chrono::milliseconds>(now - start_1).count() >= 140) break;
 					std::this_thread::yield();
 				}
 
 				Tap(k);
 
-				// 18ms 高精度自旋
+				// 40ms 高精度自旋
 				auto start_2 = std::chrono::steady_clock::now();
 				while (true) {
 					if (!XB2 || !IsTargetActive()) goto BREAK_LOOP;
@@ -548,7 +548,7 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 				}
 				else {
 					// 正常开始计时
-				CT64.store(GetTickCount64(), std::memory_order_relaxed);
+					CT64.store(GetTickCount64(), std::memory_order_relaxed);
 					SetEvent(RBevent); // 唤醒处理线程
 				}
 			}
