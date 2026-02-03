@@ -879,22 +879,14 @@ static void FreezeAllSubThreads() {
 }
 
 static void Alignkeys() {
-	const BYTE keys[] = {
-		'U', 'H', 'A', 'D', 'N', 'M', VK_OEM_PERIOD, VK_OEM_1,
-		'1', '2', '3', '4', 'L', 'F', VK_SPACE, VK_OEM_COMMA,
-		VK_LCONTROL, VK_CAPITAL, VK_RBUTTON
-	};
-
-	for (BYTE vk : keys) {
+	for (int vk = 0; vk < 256; vk++) {
 		bool phy = (GetAsyncKeyState(vk) & 0x8000) != 0;
 
-		// 如果逻辑与物理不一致
 		if (g_Out[vk] != phy) {
-			// 以物理状态(phy)为准进行补发
+			// 0x01-0x06 为鼠标按键，其余为键盘按键
 			if (vk >= 0x01 && vk <= 0x06) SendMouse(vk, phy);
 			else SendKey(vk, phy);
 
-			// 状态对齐
 			g_Out[vk] = phy;
 		}
 	}
