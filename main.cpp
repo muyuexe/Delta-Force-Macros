@@ -505,19 +505,34 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 
 	//XB1切换映射:
 	
-	// CapsLock 映射 (XB1 -> N | Normal -> Ctrl)
-	
+	// CapsLock 映射 (始终 -> Ctrl)
 	case VK_CAPITAL: {
-		static bool pN = false, pCtrl = false;
-
+		static bool pCtrl = false;
 		if (state && isActive) {
-			if (XB1) { Press('N'); pN = true; }           // XB1模式下：映射为 N
-			else { Press(VK_LCONTROL); pCtrl = true; } // 普通模式下：映射为 Ctrl
+			pCtrl = true;
+			Press(VK_LCONTROL);
 			return 1;
 		}
-		else if (!state) {
-			if (pN) { Release('N'); pN = false; return 1; }
-			if (pCtrl) { Release(VK_LCONTROL); pCtrl = false; return 1; }
+		if (!state && pCtrl) {
+			pCtrl = false;
+			Release(VK_LCONTROL);
+			return 1;
+		}
+		break;
+	}
+
+	// LShift 映射 (XB1 -> N)
+	case VK_LSHIFT: {
+		static bool pN = false;
+		if (state && isActive && XB1) {
+			pN = true;
+			Press('N');
+			return 1;
+		}
+		if (!state && pN) {
+			pN = false;
+			Release('N');
+			return 1;
 		}
 		break;
 	}
