@@ -503,36 +503,71 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 		if (isActive) return 1;
 		break;
 
-		// 【Caps/Ctrl/X/Tab 映射逻辑】
-	case VK_CAPITAL:
-	case VK_LCONTROL:
-	case 'X':
-	case VK_TAB: {
-		static bool pN = false, pCtrl = false, pM = false, pCaps = false, pDot = false, pSemi = false;
+	//XB1切换映射:
+	
+	// CapsLock 映射 (XB1 -> N | Normal -> Ctrl)
+	
+	case VK_CAPITAL: {
+		static bool pN = false, pCtrl = false;
 
 		if (state && isActive) {
-			if (vk == VK_CAPITAL) {
-				if (XB1) { Press('N'); pN = true; }
-				else { Press(VK_LCONTROL); pCtrl = true; }
-				return 1;
-			}
-			if (vk == VK_LCONTROL) {
-				if (XB1) { Press('M'); pM = true; }
-				else { Press(VK_CAPITAL); pCaps = true; }
-				return 1;
-			}
-			if (vk == 'X' && XB1) { Press(VK_OEM_PERIOD); pDot = true; return 1; }
-			if (vk == VK_TAB && XB1) { Press(VK_OEM_1); pSemi = true; return 1; }
+			if (XB1) { Press('N'); pN = true; }           // XB1模式下：映射为 N
+			else { Press(VK_LCONTROL); pCtrl = true; } // 普通模式下：映射为 Ctrl
+			return 1;
 		}
-		else if (!state) { // 抬起逻辑：只要之前标记过按下，就必须拦截并释放
+		else if (!state) {
 			if (pN) { Release('N'); pN = false; return 1; }
 			if (pCtrl) { Release(VK_LCONTROL); pCtrl = false; return 1; }
+		}
+		break;
+	}
+
+	// LControl 映射 (XB1 -> M | Normal -> Caps)
+
+	case VK_LCONTROL: {
+		static bool pM = false, pCaps = false;
+
+		if (state && isActive) {
+			if (XB1) { Press('M'); pM = true; }           // XB1模式下：映射为 M
+			else { Press(VK_CAPITAL); pCaps = true; } // 普通模式下：映射为 大小写切换
+			return 1;
+		}
+		else if (!state) {
 			if (pM) { Release('M'); pM = false; return 1; }
 			if (pCaps) { Release(VK_CAPITAL); pCaps = false; return 1; }
+		}
+		break;
+	}
+
+	// X 键映射 (XB1 -> 句号 .)
+
+	case 'X': {
+		static bool pDot = false;
+
+		if (state && isActive && XB1) {
+			Press(VK_OEM_PERIOD); // 映射为句号
+			pDot = true;
+			return 1;
+		}
+		else if (!state) {
 			if (pDot) { Release(VK_OEM_PERIOD); pDot = false; return 1; }
+		}
+		break;
+	}
+
+	// Tab 键映射 (XB1 -> 分号 ;)
+	case VK_TAB: {
+		static bool pSemi = false;
+
+		if (state && isActive && XB1) {
+			Press(VK_OEM_1); // 映射为分号 (;)
+			pSemi = true;
+			return 1;
+		}
+		else if (!state) {
 			if (pSemi) { Release(VK_OEM_1); pSemi = false; return 1; }
 		}
-		break; // 其他情况（如非活跃状态按下）统一放行
+		break;
 	}
 
 			   // 【战术 C 键】
