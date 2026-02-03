@@ -627,6 +627,7 @@ static LRESULT CALLBACK MouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
 	return Pass;
 }
 
+
 // --- 【功能 10】 准星 UI 绘制 (对游戏帧率影响极小) ---
 
 static LRESULT CALLBACK CrosshairWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -746,6 +747,7 @@ static void CreateCrosshair() {
 	}
 }
 
+
 //检测三角洲是否退出，若退出则自动关闭脚本
 static void MonitorAndExit(std::wstring processName) {
 	HANDLE hProcess = NULL;
@@ -790,6 +792,7 @@ static void MonitorAndExit(std::wstring processName) {
 	}
 }
 
+
 // --- 程序退出冻结子程序 ---
 static void FreezeAllSubThreads() {
 	DWORD dwPID = GetCurrentProcessId();
@@ -829,6 +832,8 @@ static void Alignkeys() {
 		}
 	}
 }
+
+
 
 
 // --- 程序入口 ---
