@@ -830,6 +830,7 @@ static void Alignkeys() {
 	}
 }
 
+
 // --- 程序入口 ---
 
 int WINAPI WinMain(
