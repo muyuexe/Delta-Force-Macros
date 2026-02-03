@@ -1,19 +1,5 @@
-﻿#include <windows.h>
-#include <psapi.h>
-#include <iostream>
-#include <string>
-#include <thread>
-#include <chrono>
-#include <atomic>
-#include <ShellScalingApi.h>
-#include <tlhelp32.h>
-#include <mmsystem.h>
-
-#pragma comment(lib, "Shcore.lib")
-#pragma comment(lib, "Psapi.lib")
-#pragma comment(lib, "User32.lib")
-#pragma comment(lib, "Gdi32.lib")
-#pragma comment(lib, "Winmm.lib")
+﻿#include "pch.h"
+#include "BaseFn.h"
 
 // AIM_SKIP: 特殊操作码。当 dwExtraInfo 为此值时，Hook 不会更新 Aim 业务账本
 const ULONG_PTR AIM_SKIP = 0xACE;
@@ -50,11 +36,6 @@ enum Mode : BYTE { Shoulder, Scope };
 // 影子账本：记录实际发出的逻辑按下状态，不参与业务逻辑
 std::atomic<bool> g_Out[256]{ false };
 
-// Aim: 业务账本，记录脚本逻辑发出的按下状态
-struct AimLedger {
-	std::atomic<bool> u{ false };
-	std::atomic<bool> r{ false };
-};
 AimLedger Aim;
 
 // M: Mode (模式)
@@ -88,71 +69,9 @@ HWND g_hNotifyWnd = NULL; // UI全局句柄
 // 记录主线程 ID，用于跨线程通信
 DWORD g_mainThreadId = 0;
 
-// --- 基础动作封装函数 ---
-
-// 封装：等待指定毫秒
-static void Wait(int ms) {
-	std::this_thread::sleep_for(std::chrono::milliseconds(ms));
-}
-
-// 修改 SendKey
-static void SendKey(BYTE vk, bool down, ULONG_PTR extra = 0) {
-	INPUT input = { 0 };
-	input.type = INPUT_KEYBOARD;
-	input.ki.wVk = 0;
-	input.ki.wScan = (WORD)MapVirtualKey(vk, MAPVK_VK_TO_VSC);
-	input.ki.dwFlags = KEYEVENTF_SCANCODE | (down ? 0 : KEYEVENTF_KEYUP);
-	input.ki.dwExtraInfo = extra; // 将暗号塞进 Windows 输入流
-
-	if (vk == VK_RMENU || vk == VK_RCONTROL || (vk >= 33 && vk <= 46)) {
-		input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
-	}
-	SendInput(1, &input, sizeof(INPUT));
-}
-
-// 修改 SendMouse
-static void SendMouse(BYTE vk, bool down, ULONG_PTR extra = 0) {
-	INPUT input = { 0 };
-	input.type = INPUT_MOUSE;
-	input.mi.dwExtraInfo = extra; // 将暗号塞进 Windows 输入流
-	if (vk == VK_RBUTTON) {
-		input.mi.dwFlags = down ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_RIGHTUP;
-	}
-	else if (vk == VK_LBUTTON) {
-		input.mi.dwFlags = down ? MOUSEEVENTF_LEFTDOWN : MOUSEEVENTF_LEFTUP;
-	}
-	SendInput(1, &input, sizeof(INPUT));
-}
-
-// 修改 Press / Release / Tap 顺延传递参数
-static void Press(BYTE vk, ULONG_PTR extra = 0) {
-	if (vk == VK_RBUTTON || vk == VK_LBUTTON) SendMouse(vk, true, extra);
-	else SendKey(vk, true, extra);
-}
-
-static void Release(BYTE vk, ULONG_PTR extra = 0) {
-	if (vk == VK_RBUTTON || vk == VK_LBUTTON) SendMouse(vk, false, extra);
-	else SendKey(vk, false, extra);
-}
-
-static void Tap(BYTE vk, ULONG_PTR extra = 0) {
-	Press(vk, extra);
-	Wait(5);
-	Release(vk, extra);
-}
-
-static void ResetAim() {
-	// 检查 U 账本
-	if (Aim.u.load()) {
-		Release('U'); // 默认 extra=0，Release 信号会经过 Pass 宏并把 Aim.u 置为 false
-	}
-	// 检查 R 账本
-	if (Aim.r.load()) {
-		Release(VK_RBUTTON); // 同理，重置 R 状态
-	}
-}
 
 // --- 进程检测(100ms) ---
+
 static void ActiveWindowMonitor() {
 	static DWORD lastPid = 0;
 	static bool lastState = false; // 记录上一次的状态
@@ -200,6 +119,7 @@ static inline bool IsTargetActive() {
 	//return 1; // 目标程序检测开关
 	return g_IsGameActive.load(std::memory_order_relaxed);
 }
+
 
 // --- 消息提示 UI ---
 
@@ -457,6 +377,9 @@ static void Thread_RB_Loop() {
 		}
 	}
 }
+
+
+
 // --- Hook 回调逻辑 ---
 
 static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
