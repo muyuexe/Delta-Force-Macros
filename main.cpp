@@ -1,7 +1,7 @@
 ﻿#include "pch.h"
 #include "BaseFn.h"
 
-// AIM_SKIP: 特殊操作码。当 dwExtraInfo 为此值时，Hook 不会更新 Aim 业务账本
+// AIM_SKIP： 特殊操作码。当 dwExtraInfo 为此值时，Hook 不会更新 Aim 业务账本
 const ULONG_PTR AIM_SKIP = 0xACE;
 
 // Pass 宏：放行并审计物理按键状态
@@ -30,7 +30,7 @@ const ULONG_PTR AIM_SKIP = 0xACE;
     return CallNextHookEx(NULL, nCode, wParam, lParam);\
 }())
 
-// Mode: 开镜模式 (Shoulder/Scope)
+// Mode： 开镜模式 (Shoulder/Scope)
 enum Mode : BYTE { Shoulder, Scope };
 
 // 影子账本：记录实际发出的逻辑按下状态，不参与业务逻辑
@@ -38,25 +38,25 @@ std::atomic<bool> g_Out[256]{ false };
 
 AimLedger Aim;
 
-// M: Mode (模式)
+// M： Mode (模式)
 std::atomic<Mode> M{ Scope };
-// S: Shield (屏蔽位)
+// S： Shield (屏蔽位)
 std::atomic<bool> S{ false };
-// Num: NuMWer (状态器数值)
+// Num： NuMWer (状态器数值)
 std::atomic<int> Num{ 1 };
-// XB1: XButton1 (鼠标侧键1)
+// XB1： XButton1 (鼠标侧键1)
 std::atomic<bool> XB1{ false };
-// XB2: XButton2 (鼠标侧键2)
+// XB2： XButton2 (鼠标侧键2)
 std::atomic<bool> XB2{ false };
-// KF: Key F (F键状态)
+// KF： Key F (F键状态)
 std::atomic<bool> KF{ false };
-// KS: Key Space (空格状态)
+// KS： Key Space (空格状态)
 std::atomic<bool> KS{ false };
-// CT64: C-Key Timestamp 64-bit (C键计时戳)
+// CT64： C-Key Timestamp 64-bit (C键计时戳)
 std::atomic<ULONGLONG> CT64{ false };
-// RB: Right Button (右键状态)
+// RB： Right Button (右键状态)
 std::atomic<bool> RB{ false };
-// MW: Mouse Wheel (滚轮信号)
+// MW： Mouse Wheel (滚轮信号)
 std::atomic<int> MW{ 0 };
 // 前台检测
 std::atomic<bool> g_IsGameActive{ false };
@@ -292,7 +292,7 @@ static void Thread_Space_Loop() {
 	}
 }
 
-// 【功能 6】 鼠标滚轮逻辑
+// 【功能 6/7】 鼠标滚轮逻辑
 static void Thread_MW_Loop() {
 	while (WaitForSingleObject(MWevent, INFINITE) == WAIT_OBJECT_0) {
 		int sDelta = MW.exchange(0);
@@ -322,7 +322,7 @@ static void Thread_MW_Loop() {
 	}
 }
 
-// 【功能 2/6/7/C】 右键逻辑
+// 【功能 2/6/7/5】 右键逻辑
 static void Thread_RB_Loop() {
 	while (true) {
 		// 修改点：WaitForSingleObject 增加 100ms 超时，不再死等信号
@@ -394,6 +394,7 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 	bool isActive = IsTargetActive();
 
 	// --- 全局同步逻辑 (无论是否在游戏内，确保状态正确) ---
+		// 【功能3/4】
 	switch (vk) {
 	case 'F':     KF = state; SetEvent(Fevent); break;
 	case VK_SPACE: KS = state; SetEvent(SPACEevent); break;
@@ -401,7 +402,7 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 
 	// --- 业务逻辑处理 ---
 	switch (vk) {
-		// 【Q/E 叠加 A/D】
+		// 【功能8： Q/E 叠加 A/D】
 	case 'Q':
 		if (state && isActive) Press('A');
 		else if (!state) Release('A'); // 松开必须执行，确保复位
@@ -412,12 +413,12 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 		else if (!state) Release('D');
 		break;
 
-		// 【武器槽位】
+		// 【功能1：记录武器槽位】
 	case '1': case '2': case '4':
 		if (state && isActive) Num = (vk == '1' ? 1 : (vk == '2' ? 2 : 4));
 		break;
 
-		// 【F 与 空格拦截】
+		// 【功能8： F 与 空格拦截】
 	case 'F':
 		if (isActive && !XB1) return 1;
 		break;
@@ -425,10 +426,9 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 	case VK_SPACE:
 		if (isActive) return 1;
 		break;
-
-	//XB1切换映射:
 	
-	// CapsLock 映射 (始终 -> Ctrl)
+
+	// 【功能8： CapsLock 映射 (始终 -> Ctrl)】
 	case VK_CAPITAL: {
 		static bool pCtrl = false;
 		if (state && isActive) {
@@ -443,6 +443,9 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 		}
 		break;
 	}
+
+
+	// 【功能8：XB1按下切换映射】
 
 	// LShift 映射 (XB1 -> N)
 	case VK_LSHIFT: {
@@ -508,7 +511,9 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 		break;
 	}
 
-			   // 【战术 C 键】
+
+
+	 // 【功能5：战术 C 键】
 	case 'C':
 		if (isActive && !XB1) {
 			if (state) {
@@ -562,7 +567,7 @@ static LRESULT CALLBACK MouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
 				XB1 = false; // 松开：同步状态
 			}
 
-			if (isActive) return 1; // 在游戏内：拦截物理信号（无论按下还是松开）
+			if (isActive) return 1; // 【功能8：在游戏内：拦截物理信号（无论按下还是松开）】
 			break; // 非游戏内，跳出 switch 执行最后的 Pass
 		}
 
@@ -579,7 +584,7 @@ static LRESULT CALLBACK MouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
 				SetEvent(XB2event); // 再次触发事件确保线程从 Wait 中醒来检查 XB2 状态
 			}
 
-			if (isActive) return 1; // 在游戏内：拦截物理信号
+			if (isActive) return 1; // 【功能8：在游戏内：拦截物理信号】
 			break;
 		}
 		break;
@@ -616,7 +621,7 @@ static LRESULT CALLBACK MouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
 				short rDelta = (short)HIWORD(m->mouseData);
 				MW = (int)rDelta;
 				SetEvent(MWevent);
-				return 1;
+				return 1; //【功能8：在游戏内：拦截物理信号】
 			}
 			// 如果 XB1 为 true，不执行上述逻辑，直接跳出 switch 执行 Pass
 		}
@@ -628,7 +633,7 @@ static LRESULT CALLBACK MouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
 }
 
 
-// --- 【功能 10】 准星 UI 绘制 (对游戏帧率影响极小) ---
+// --- 【功能 9】 准星 UI 绘制 (对游戏帧率影响极小) ---
 
 static LRESULT CALLBACK CrosshairWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 	if (msg == WM_PAINT) {
@@ -681,16 +686,16 @@ static LRESULT CALLBACK CrosshairWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
 
 		// --- 新增：距离中心 15px 的 3x1 像素黑线 ---
 
-		// 上方标记 (横线: 宽3高1)
+		// 上方标记 (横线： 宽3高1)
 		DrawMark(midX - 1, midY - 1 - markDist, 3, 1);
 
-		// 下方标记 (横线: 宽3高1)
+		// 下方标记 (横线： 宽3高1)
 		DrawMark(midX - 1, midY + 1 + markDist, 3, 1);
 
-		// 左侧标记 (竖线: 宽1高3)
+		// 左侧标记 (竖线： 宽1高3)
 		DrawMark(midX - 1 - markDist, midY - 1, 1, 3);
 
-		// 右侧标记 (竖线: 宽1高3)
+		// 右侧标记 (竖线： 宽1高3)
 		DrawMark(midX + 1 + markDist, midY - 1, 1, 3);
 
 		DeleteObject(bgBrush);
