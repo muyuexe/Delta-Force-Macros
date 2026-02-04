@@ -333,7 +333,7 @@ static void Thread_RB_Loop() {
 		ULONGLONG lastC = CT64.load(std::memory_order_relaxed);
 
 		// --- 核心逻辑：检测爆闪倒计时是否结束 ---
-		if (lastC > 0 && (now - lastC >= 8000)) {
+		if (lastC > 0 && (now - lastC >= 4000)) {
 			CT64.store(0); // 清空计时，防止重复触发
 			if (isActive && g_hNotifyWnd) {
 				// 发送新增的消息号 101
@@ -356,7 +356,7 @@ static void Thread_RB_Loop() {
 
 		// 逻辑分支 2：右键按下触发
 		if (RB.load()) {
-			if (lastC > 0 && (now - lastC <= 8000)) {
+			if (lastC > 0 && (now - lastC <= 4000)) {
 				Tap(VK_OEM_COMMA);
 				CT64.store(0);
 			}
