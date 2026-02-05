@@ -426,39 +426,22 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 	case VK_SPACE:
 		if (isActive) return 1;
 		break;
+
+	// 【功能8：XB1切换映射&caps和Lctrl交换映射】
 	
-
-	// 【功能8： CapsLock 映射 (始终 -> Ctrl)】
+	// CapsLock 映射 (XB1 -> N | Normal -> Ctrl)
+	
 	case VK_CAPITAL: {
-		static bool pCtrl = false;
+		static bool pN = false, pCtrl = false;
+
 		if (state && isActive) {
-			pCtrl = true;
-			Press(VK_LCONTROL);
+			if (XB1) { Press('N'); pN = true; }           // XB1模式下：映射为 N
+			else { Press(VK_LCONTROL); pCtrl = true; } // 普通模式下：映射为 Ctrl
 			return 1;
 		}
-		if (!state && pCtrl) {
-			pCtrl = false;
-			Release(VK_LCONTROL);
-			return 1;
-		}
-		break;
-	}
-
-
-	// 【功能8：XB1按下切换映射】
-
-	// LShift 映射 (XB1 -> N)
-	case VK_LSHIFT: {
-		static bool pN = false;
-		if (state && isActive && XB1) {
-			pN = true;
-			Press('N');
-			return 1;
-		}
-		if (!state && pN) {
-			pN = false;
-			Release('N');
-			return 1;
+		else if (!state) {
+			if (pN) { Release('N'); pN = false; return 1; }
+			if (pCtrl) { Release(VK_LCONTROL); pCtrl = false; return 1; }
 		}
 		break;
 	}
