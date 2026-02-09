@@ -322,55 +322,94 @@ static void Thread_MW_Loop() {
 	}
 }
 
-// 【功能 2/6/7/5】 右键逻辑
+// 【功能 2/6/7/5】 右键逻辑 (融合计时器管理的专业版)
 static void Thread_RB_Loop() {
 	while (true) {
-		// 修改点：WaitForSingleObject 增加 100ms 超时，不再死等信号
-		DWORD result = WaitForSingleObject(RBevent, 100);
-
-		bool isActive = IsTargetActive();
+		// --- 1. 动态计算等待时间 (核心算法) ---
+		DWORD waitTime = INFINITE;
 		ULONGLONG now = GetTickCount64();
-		ULONGLONG lastC = CT64.load(std::memory_order_relaxed);
+		// 获取当前 C 键记录的时间戳
+		ULONGLONG startC = CT64.load(std::memory_order_relaxed);
 
-		// --- 核心逻辑：检测爆闪倒计时是否结束 ---
-		if (lastC > 0 && (now - lastC >= 4000)) {
-			CT64.store(0); // 清空计时，防止重复触发
-			if (isActive && g_hNotifyWnd) {
-				// 发送新增的消息号 101
-				PostMessage(g_hNotifyWnd, WM_USER + 101, 0, 0);
+		if (startC > 0) {
+			ULONGLONG elapsed = now - startC;
+
+			// 如果已经超时 (超过4000ms)
+			if (elapsed >= 4000) {
+				CT64.store(0); // 清除计时
+
+				// 发送“爆闪终止”提示 (仅在游戏激活时)
+				if (IsTargetActive() && g_hNotifyWnd) {
+					PostMessage(g_hNotifyWnd, WM_USER + 101, 0, 0);
+				}
+
+				// 超时处理完后，恢复无限等待，直到下一次按键
+				waitTime = INFINITE;
+			}
+			else {
+				// 如果没超时，计算剩余时间 (例如还剩 1200ms)
+				// 这样线程会精准睡眠到那一刻醒来，或者被按键提前唤醒
+				waitTime = (DWORD)(4000 - elapsed);
 			}
 		}
 
-		// 如果不是由 RBevent 触发（即 100ms 自动醒来），则跳过下方的按键逻辑判断
-		if (result != WAIT_OBJECT_0) continue;
+		// --- 2. 智能阻塞 (挂起线程) ---
+		// 线程在这里暂停。唤醒条件：
+		// A. RBevent 信号来了 (按下了 C 或 右键) -> 返回 WAIT_OBJECT_0
+		// B. waitTime 时间到了 (爆闪结束)     -> 返回 WAIT_TIMEOUT
+		DWORD result = WaitForSingleObject(RBevent, waitTime);
 
-		if (!isActive) continue;
+		// 如果是超时醒来，直接进入下一次循环 (上面代码会自动处理超时逻辑)
+		if (result == WAIT_TIMEOUT) continue;
+
+		// --- 3. 业务逻辑处理 (被信号唤醒) ---
+		// 必须先检查游戏是否前台，否则不执行操作
+		if (!IsTargetActive()) continue;
+
+		// 重新获取最新状态
+		now = GetTickCount64();
+		startC = CT64.load(std::memory_order_relaxed); // 再次读取，确保拿到 Hook 刚写入的值
 
 		bool isAiming = (Aim.u.load() || Aim.r.load());
 
-		// 逻辑分支 1：C 键触发的连携 (先右后C)
-		if (isAiming && lastC > 0 && (now - lastC < 50)) {
-			Tap(VK_OEM_COMMA);
-			CT64.store(0);
+		// [逻辑分支 1]：纯 C 键触发的连携 (先按住右键瞄准中，突然按 C)
+		// 场景：开镜架点时，手动补一个爆闪
+		if (isAiming && startC > 0 && (now - startC < 50)) {
+			Tap(VK_OEM_COMMA); // 触发逗号
+			CT64.store(0);     // 消耗掉计时器
+			startC = 0;        // 本地变量同步归零
 		}
 
-		// 逻辑分支 2：右键按下触发
+		// [逻辑分支 2]：物理右键状态处理
 		if (RB.load()) {
-			if (lastC > 0 && (now - lastC <= 4000)) {
-				Tap(VK_OEM_COMMA);
-				CT64.store(0);
+			// --- 核心修改：检测“爆闪状态下开镜” ---
+			// 场景：先按 C (开始计时)，4秒内按下了右键
+			bool interrupted = false;
+			if (startC > 0 && (now - startC <= 4000)) {
+				Tap(VK_OEM_COMMA); // 触发逗号 (打断/前摇)
+				CT64.store(0);     // 消耗掉计时器
+				interrupted = true;
 			}
+
+			// 执行常规右键逻辑
 			Press('H');
 			ResetAim();
+
 			if (M == Shoulder) {
 				Press('U');
-				std::thread([]() { Wait(10); Tap(VK_RBUTTON, AIM_SKIP); }).detach();
+				// 异步处理：如果刚才触发了打断(逗号)，稍微多等 20ms 让游戏反应过来
+				// 使用 lambda 捕获 interrupted 变量
+				std::thread([interrupted]() {
+					Wait(interrupted ? 30 : 10);
+					Tap(VK_RBUTTON, AIM_SKIP);
+					}).detach();
 			}
 			else {
 				Press(VK_RBUTTON);
 			}
 		}
 		else {
+			// 右键松开逻辑
 			Release('H');
 			if (S) S = false;
 			else ResetAim();
@@ -506,25 +545,29 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 		// 【功能5：战术 C 键】
 	case 'C':
 		if (isActive && !XB1) {
-			if (state) {
-				// 如果当前已经在计时(说明是重复按下)
+			if (state) { // 按下时
+				// 如果当前已经在计时 (说明是重复按下，或者想取消)
 				if (CT64.load() > 0) {
 					CT64.store(0); // 销毁计时器
 					if (g_hNotifyWnd) {
 						PostMessage(g_hNotifyWnd, WM_USER + 101, 0, 0); // 发送“爆闪终止”
 					}
+					// 即使是取消，也建议唤醒一下线程让它更新 waitTime 为 INFINITE
+					SetEvent(RBevent);
 				}
 				else {
 					// 正常开始计时
 					CT64.store(GetTickCount64(), std::memory_order_relaxed);
-					SetEvent(RBevent); // 唤醒处理线程
+					// 【关键】：必须设置事件！
+					// 这会让 Thread_RB_Loop 瞬间醒来，计算出 waitTime = 4000
+					// 从而进入精准倒计时状态
+					SetEvent(RBevent);
 				}
 			}
-			return 1;
+			return 1; // 拦截 C 键物理输入
 		}
 		break;
 	}
-
 	return Pass;
 }
 
