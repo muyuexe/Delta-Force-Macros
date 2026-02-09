@@ -286,7 +286,7 @@ static void Thread_F_Loop() {
 static void Thread_Space_Loop() {
 	while (WaitForSingleObject(SPACEevent, INFINITE) == WAIT_OBJECT_0) {
 		while (KS && IsTargetActive()) {
-			Tap(VK_SPACE);
+			Tap(VK_NUMPAD1);
 			Wait(20);
 		}
 	}
@@ -418,53 +418,60 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 		if (state && isActive) Num = (vk == '1' ? 1 : (vk == '2' ? 2 : 4));
 		break;
 
-		// 【功能8： F 与 空格拦截】
+		// 【功能8： F拦截】
 	case 'F':
 		if (isActive && !XB1) return 1;
 		break;
 
-	case VK_SPACE:
-		if (isActive) return 1;
-		break;
+		// 【功能8：XB1切换映射&Lshift和Lctrl交换映射】
 
-	// 【功能8：XB1切换映射&caps和Lctrl交换映射】
-	
-	// CapsLock 映射 (XB1 -> N | Normal -> Ctrl)
-	
-	case VK_CAPITAL: {
-		static bool pN = false, pCtrl = false;
+		// Lshift 映射 (Normal -> Ctrl)
+	case VK_LSHIFT: {
+		static bool pCtrl = false;
 
 		if (state && isActive) {
-			if (XB1) { Press('N'); pN = true; }           // XB1模式下：映射为 N
-			else { Press(VK_LCONTROL); pCtrl = true; } // 普通模式下：映射为 Ctrl
-			return 1;
-		}
+			Press(VK_LCONTROL); pCtrl = true; return 1;
+		} // 普通模式下：映射为 Ctrl
 		else if (!state) {
-			if (pN) { Release('N'); pN = false; return 1; }
 			if (pCtrl) { Release(VK_LCONTROL); pCtrl = false; return 1; }
 		}
 		break;
 	}
 
-	// LControl 映射 (XB1 -> M | Normal -> Caps)
-
+		// LControl 映射 (XB1 -> M | Normal -> Lshift)
 	case VK_LCONTROL: {
-		static bool pM = false, pCaps = false;
+		static bool pM = false, pShift = false;
 
 		if (state && isActive) {
-			if (XB1) { Press('M'); pM = true; }           // XB1模式下：映射为 M
-			else { Press(VK_CAPITAL); pCaps = true; } // 普通模式下：映射为 大小写切换
-			return 1;
+			if (XB1) {
+				Press('M'); pM = true; return 1;
+			} // XB1模式下：映射为 M
+			else {
+				Press(VK_LSHIFT); pShift = true; return 1;
+			} // 普通模式下：映射为 Lshift
+
 		}
 		else if (!state) {
 			if (pM) { Release('M'); pM = false; return 1; }
-			if (pCaps) { Release(VK_CAPITAL); pCaps = false; return 1; }
+			if (pShift) { Release(VK_LSHIFT); pShift = false; return 1; }
 		}
 		break;
 	}
 
-	// X 键映射 (XB1 -> 句号 .)
+		// CapsLock 映射 (XB1 -> N)
+	case VK_CAPITAL: {
+		static bool pN = false;
 
+		if (state && isActive) {
+			if (XB1) { Press('N'); pN = true; return 1; } // XB1模式下：映射为 N
+		}
+		else if (!state) {
+			if (pN) { Release('N'); pN = false; return 1; }
+		}
+		break;
+	}
+
+		// X 键映射 (XB1 -> 句号 .)
 	case 'X': {
 		static bool pDot = false;
 
@@ -479,7 +486,7 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 		break;
 	}
 
-	// Tab 键映射 (XB1 -> 分号 ;)
+		// Tab 键映射 (XB1 -> 分号 ;)
 	case VK_TAB: {
 		static bool pSemi = false;
 
@@ -496,7 +503,7 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 
 
 
-	 // 【功能5：战术 C 键】
+		// 【功能5：战术 C 键】
 	case 'C':
 		if (isActive && !XB1) {
 			if (state) {
