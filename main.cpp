@@ -286,8 +286,8 @@ static void Thread_F_Loop() {
 static void Thread_Space_Loop() {
 	while (WaitForSingleObject(SPACEevent, INFINITE) == WAIT_OBJECT_0) {
 		while (KS && IsTargetActive()) {
-			Tap(VK_NUMPAD1);
-			Wait(20);
+			Tap('G');
+			//Wait(20);
 		}
 	}
 }
@@ -433,11 +433,6 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 	bool isActive = IsTargetActive();
 
 	// --- 全局同步逻辑 (无论是否在游戏内，确保状态正确) ---
-		// 【功能3/4】
-	switch (vk) {
-	case 'F':     KF = state; SetEvent(Fevent); break;
-	case VK_SPACE: KS = state; SetEvent(SPACEevent); break;
-	}
 
 	// --- 业务逻辑处理 ---
 	switch (vk) {
@@ -457,8 +452,12 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 		if (state && isActive) Num = (vk == '1' ? 1 : (vk == '2' ? 2 : 4));
 		break;
 
-		// 【功能8： F拦截】
+		// 【功能4】
+	case VK_SPACE: KS = state; SetEvent(SPACEevent); break;
+
+		// 【功能3】
 	case 'F':
+		KF = state; SetEvent(Fevent);
 		if (isActive && !XB1) return 1;
 		break;
 
