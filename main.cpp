@@ -52,8 +52,12 @@ std::atomic<bool> XB2{ false };
 std::atomic<bool> KF{ false };
 // KS： Key Space (空格状态)
 std::atomic<bool> KS{ false };
-// CT64： C-Key Timestamp 64-bit (C键计时戳)
-std::atomic<ULONGLONG> CT64{ false };
+// 记录C按下时刻的时间戳
+std::atomic<ULONGLONG> CpressTime{ false };
+// F是否处于长按模式，用于拦截最后的松开信号
+std::atomic<bool> FisIntercepting{ false };
+// 记录F按下时刻的时间戳
+std::chrono::steady_clock::time_point FpressTime; 
 // RB： Right Button (右键状态)
 std::atomic<bool> RB{ false };
 // MW： Mouse Wheel (滚轮信号)
@@ -274,10 +278,27 @@ static void Thread_XB2_Loop() {
 // 【功能 3】 F键循环
 static void Thread_F_Loop() {
 	while (WaitForSingleObject(Fevent, INFINITE) == WAIT_OBJECT_0) {
-		// 只要切屏，isActive 变假，这里的 while 循环会自动终止
-		while (KF && !XB1 && IsTargetActive()) {
-			Tap('F');
-			Wait(20);
+		// --- 400ms 判定 ---
+		bool isLongPress = true;
+		for (int i = 0; i < 40; i++) {
+			Wait(10);
+			if (!KF) { // 用户在 400ms 内松手了
+				isLongPress = false;
+				break;
+			}
+		}
+
+		// --- 执行逻辑 ---
+		if (isLongPress && IsTargetActive()) {
+			// 判定为长按，开启拦截标记
+			FisIntercepting = true;
+
+			// 只要物理按键 KF 还没松开，就持续执行 Tap
+			while (KF && !XB1 && IsTargetActive()) {
+				Tap('F');
+				Wait(20);
+			}
+			// 循环结束说明物理按键已松开，或者切屏了
 		}
 	}
 }
@@ -324,60 +345,75 @@ static void Thread_MW_Loop() {
 
 // 【功能 2/6/7/5】 右键逻辑
 static void Thread_RB_Loop() {
-	while (true) {
-		// 修改点：WaitForSingleObject 增加 100ms 超时，不再死等信号
-		DWORD result = WaitForSingleObject(RBevent, 100);
+	// 优雅的无限等待：不占 CPU，由事件精确唤醒
+	while (WaitForSingleObject(RBevent, INFINITE) == WAIT_OBJECT_0) {
 
 		bool isActive = IsTargetActive();
 		ULONGLONG now = GetTickCount64();
-		ULONGLONG lastC = CT64.load(std::memory_order_relaxed);
 
-		// --- 核心逻辑：检测爆闪倒计时是否结束 ---
+		// 先读取当前令牌的值
+		ULONGLONG lastC = CpressTime.load(std::memory_order_relaxed);
+
+		// --- 逻辑 A：爆闪倒计时自然超时检测 ---
 		if (lastC > 0 && (now - lastC >= 4000)) {
-			CT64.store(0); // 清空计时，防止重复触发
-			if (isActive && g_hNotifyWnd) {
-				// 发送新增的消息号 101
-				PostMessage(g_hNotifyWnd, WM_USER + 101, 0, 0);
+			// 【原子竞争点】尝试将时间戳从 lastC 归零
+			// 如果成功，说明这一瞬间没有其他线程（右键或C键）动过它
+			ULONGLONG expected = lastC;
+			if (CpressTime.compare_exchange_strong(expected, 0)) {
+				if (isActive && g_hNotifyWnd) {
+					PostMessage(g_hNotifyWnd, WM_USER + 101, 0, 0);
+				}
 			}
 		}
 
-		// 如果不是由 RBevent 触发（即 100ms 自动醒来），则跳过下方的按键逻辑判断
-		if (result != WAIT_OBJECT_0) continue;
+		// 重新获取最新的令牌状态，因为可能在上面已被清零
+		lastC = CpressTime.load(std::memory_order_relaxed);
 
 		if (!isActive) continue;
 
 		bool isAiming = (Aim.u.load() || Aim.r.load());
 
-		// 逻辑分支 1：C 键触发的连携 (先右后C)
+		// --- 逻辑 B：C键极短时间连携 (先右后C 50ms内) ---
 		if (isAiming && lastC > 0 && (now - lastC < 50)) {
-			Tap(VK_OEM_COMMA);
-			CT64.store(0);
+			ULONGLONG exp = lastC;
+			if (CpressTime.compare_exchange_strong(exp, 0)) {
+				Tap(VK_OEM_COMMA);
+			}
 		}
 
-		// 逻辑分支 2：右键按下触发
+		// --- 逻辑 C：右键常规动作逻辑 ---
 		if (RB.load()) {
+			// 右键按下时，若处于 4s 爆闪有效期内，则触发 C 键连带动作
+			lastC = CpressTime.load(std::memory_order_relaxed); // 获取最新状态
 			if (lastC > 0 && (now - lastC <= 4000)) {
-				Tap(VK_OEM_COMMA);
-				CT64.store(0);
+				ULONGLONG exp = lastC;
+				if (CpressTime.compare_exchange_strong(exp, 0)) {
+					Tap(VK_OEM_COMMA);
+				}
 			}
+
 			Press('H');
 			ResetAim();
 			if (M == Shoulder) {
 				Press('U');
-				std::thread([]() { Wait(10); Tap(VK_RBUTTON, AIM_SKIP); }).detach();
+				// 异步模拟物理点击，防止 UI 或系统延迟阻塞此核心循环
+				std::thread([]() {
+					Wait(10);
+					Tap(VK_RBUTTON, AIM_SKIP);
+					}).detach();
 			}
 			else {
 				Press(VK_RBUTTON);
 			}
 		}
 		else {
+			// 右键松开：收尾清空状态
 			Release('H');
 			if (S) S = false;
 			else ResetAim();
 		}
 	}
 }
-
 
 
 // --- Hook 回调逻辑 ---
@@ -418,9 +454,22 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 
 		// 【功能3】
 	case 'F':
-		KF = state; SetEvent(Fevent);
-		if (isActive && !XB1) return 1;
-		break;
+		if (state) { // KeyDown: 按下 F
+			if (!KF) {
+				KF = true;
+				FpressTime = std::chrono::steady_clock::now();
+				SetEvent(Fevent); // 唤醒计时线程
+			}
+			break; // 走到底部的 return pass 放行
+		}
+		else { // KeyUp: 松开 F
+			KF = false;
+			if (FisIntercepting) {
+				FisIntercepting = false; // 重置状态
+				return 1; // 【拦截信号】不执行 break，直接返回 1，防止游戏收到弹起信号
+			}
+			break; // 【放行信号】走到底部的 return pass
+		}
 
 		// 【功能8：XB1切换映射&Lshift和Lctrl交换映射】
 
@@ -502,28 +551,41 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 
 
 
-		// 【功能5：战术 C 键】
 	case 'C':
 		if (isActive && !XB1) {
-			if (state) {
-				// 如果当前已经在计时(说明是重复按下)
-				if (CT64.load() > 0) {
-					CT64.store(0); // 销毁计时器
+			if (state) { // 按下 C 键
+				// 【原子操作】取出旧令牌并设为 0。这一步直接完成了“逻辑锁定”
+				ULONGLONG oldTime = CpressTime.exchange(0);
+
+				if (oldTime > 0) {
+					// 如果旧值 > 0，说明之前在爆闪中，现在是“手动提前关闭”
 					if (g_hNotifyWnd) {
-						PostMessage(g_hNotifyWnd, WM_USER + 101, 0, 0); // 发送“爆闪终止”
+						PostMessage(g_hNotifyWnd, WM_USER + 101, 0, 0);
 					}
 				}
 				else {
-					// 正常开始计时
-					CT64.store(GetTickCount64(), std::memory_order_relaxed);
-					SetEvent(RBevent); // 唤醒处理线程
+					// 开启新爆闪计时
+					ULONGLONG startTime = GetTickCount64();
+					CpressTime.store(startTime);
+					SetEvent(RBevent); // 唤醒线程进行初始逻辑判断
+
+					// 【优雅的异步闹钟】
+					// 4 秒后，这个线程会醒来查看“那个人”是否还在
+					std::thread([startTime]() {
+						Sleep(4005);
+						// 只有当 CpressTime 依然是我们启动时的那个 startTime，才说明没人动过它
+						// 此时踢醒处理线程执行“逻辑 A”进行超时清理
+						if (CpressTime.load() == startTime) {
+							SetEvent(RBevent);
+						}
+						}).detach();
 				}
 			}
 			return 1;
 		}
 		break;
-	}
 
+	}
 	return Pass;
 }
 
