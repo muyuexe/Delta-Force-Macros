@@ -57,7 +57,7 @@ std::atomic<ULONGLONG> CpressTime{ false };
 // F是否处于长按模式，用于拦截最后的松开信号
 std::atomic<bool> FisIntercepting{ false };
 // 记录F按下时刻的时间戳
-std::chrono::steady_clock::time_point FpressTime; 
+std::chrono::steady_clock::time_point FpressTime;
 // RB： Right Button (右键状态)
 std::atomic<bool> RB{ false };
 // MW： Mouse Wheel (滚轮信号)
@@ -486,7 +486,7 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 		break;
 	}
 
-		// LControl 映射 (XB1 -> M | Normal -> Lshift)
+				  // LControl 映射 (XB1 -> M | Normal -> Lshift)
 	case VK_LCONTROL: {
 		static bool pM = false, pShift = false;
 
@@ -506,7 +506,7 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 		break;
 	}
 
-		// CapsLock 映射 (XB1 -> N)
+					// CapsLock 映射 (XB1 -> N)
 	case VK_CAPITAL: {
 		static bool pN = false;
 
@@ -519,7 +519,7 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 		break;
 	}
 
-		// X 键映射 (XB1 -> 句号 .)
+				   // X 键映射 (XB1 -> 句号 .)
 	case 'X': {
 		static bool pDot = false;
 
@@ -534,7 +534,7 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 		break;
 	}
 
-		// Tab 键映射 (XB1 -> 分号 ;)
+			// Tab 键映射 (XB1 -> 分号 ;)
 	case VK_TAB: {
 		static bool pSemi = false;
 
@@ -550,38 +550,49 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 	}
 
 
-
+			   // 【功能5：战术 C 键】
 	case 'C':
 		if (isActive && !XB1) {
-			if (state) { // 按下 C 键
-				// 【原子操作】取出旧令牌并设为 0。这一步直接完成了“逻辑锁定”
-				ULONGLONG oldTime = CpressTime.exchange(0);
+			// 状态锁：处理系统长按重复消息，确保单次按下只触发一次逻辑
+			static bool C_input = false;
 
-				if (oldTime > 0) {
-					// 如果旧值 > 0，说明之前在爆闪中，现在是“手动提前关闭”
-					if (g_hNotifyWnd) {
-						PostMessage(g_hNotifyWnd, WM_USER + 101, 0, 0);
+			if (state) { // 按下 C 键
+				if (!C_input) {
+					C_input = true;
+
+					// 【原子操作】取出旧令牌并设为 0。这一步直接完成了“逻辑锁定”
+					ULONGLONG oldTime = CpressTime.exchange(0);
+
+					if (oldTime > 0) {
+						// 如果旧值 > 0，说明之前在爆闪中，现在是“手动提前关闭”
+						if (g_hNotifyWnd) {
+							PostMessage(g_hNotifyWnd, WM_USER + 101, 0, 0);
+						}
+					}
+					else {
+						// 开启新爆闪计时
+						ULONGLONG startTime = GetTickCount64();
+						CpressTime.store(startTime);
+						SetEvent(RBevent); // 唤醒线程进行初始逻辑判断
+
+						// 【优雅的异步闹钟】
+						// 4 秒后，这个线程会醒来查看“那个人”是否还在
+						std::thread([startTime]() {
+							Sleep(4005);
+							// 只有当 CpressTime 依然是我们启动时的那个 startTime，才说明没人动过它
+							// 此时踢醒处理线程执行“逻辑 A”进行超时清理
+							if (CpressTime.load() == startTime) {
+								SetEvent(RBevent);
+							}
+							}).detach();
 					}
 				}
-				else {
-					// 开启新爆闪计时
-					ULONGLONG startTime = GetTickCount64();
-					CpressTime.store(startTime);
-					SetEvent(RBevent); // 唤醒线程进行初始逻辑判断
-
-					// 【优雅的异步闹钟】
-					// 4 秒后，这个线程会醒来查看“那个人”是否还在
-					std::thread([startTime]() {
-						Sleep(4005);
-						// 只有当 CpressTime 依然是我们启动时的那个 startTime，才说明没人动过它
-						// 此时踢醒处理线程执行“逻辑 A”进行超时清理
-						if (CpressTime.load() == startTime) {
-							SetEvent(RBevent);
-						}
-						}).detach();
-				}
+				return 1;
 			}
-			return 1;
+			else { // 松开 C 键
+				C_input = false;
+				return 1;
+			}
 		}
 		break;
 
