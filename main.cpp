@@ -54,10 +54,6 @@ std::atomic<bool> KF{ false };
 std::atomic<bool> KS{ false };
 // 记录C按下时刻的时间戳
 std::atomic<ULONGLONG> CpressTime{ false };
-// F是否处于长按模式，用于拦截最后的松开信号
-std::atomic<bool> FisIntercepting{ false };
-// 记录F按下时刻的时间戳
-std::chrono::steady_clock::time_point FpressTime;
 // RB： Right Button (右键状态)
 std::atomic<bool> RB{ false };
 // MW： Mouse Wheel (滚轮信号)
@@ -278,27 +274,28 @@ static void Thread_XB2_Loop() {
 // 【功能 3】 F键循环
 static void Thread_F_Loop() {
 	while (WaitForSingleObject(Fevent, INFINITE) == WAIT_OBJECT_0) {
-		// --- 400ms 判定 ---
 		bool isLongPress = true;
-		for (int i = 0; i < 40; i++) {
-			Wait(10);
-			if (!KF) { // 用户在 400ms 内松手了
+		for (int i = 0; i < 20; i++) {
+			if (!KF) {
+				Release('F');
 				isLongPress = false;
 				break;
 			}
+			Wait(15);
 		}
-
-		// --- 执行逻辑 ---
-		if (isLongPress && IsTargetActive()) {
-			// 判定为长按，开启拦截标记
-			FisIntercepting = true;
-
-			// 只要物理按键 KF 还没松开，就持续执行 Tap
-			while (KF && !XB1 && IsTargetActive()) {
-				Tap('F');
-				Wait(20);
+		if (isLongPress) {
+			if (!XB1) {
+				while (KF && IsTargetActive()) {
+					Tap('F');
+					Wait(15);
+				}
 			}
-			// 循环结束说明物理按键已松开，或者切屏了
+			else {
+				while (KF && IsTargetActive()) {
+					Wait(15);
+				}
+				Release('F');
+			}
 		}
 	}
 }
@@ -454,23 +451,17 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 
 		// 【功能3】
 	case 'F':
-		if (state) { // KeyDown: 按下 F
-			if (!KF) {
-				KF = true;
-				FpressTime = std::chrono::steady_clock::now();
-				SetEvent(Fevent); // 唤醒计时线程
-			}
-			break; // 走到底部的 return pass 放行
+		if (state && isActive && !KF) {
+			KF = true;
+			SetEvent(Fevent);
 		}
-		else { // KeyUp: 松开 F
+		else if (!state) {
 			KF = false;
-			if (FisIntercepting) {
-				FisIntercepting = false; // 重置状态
-				return 1; // 【拦截信号】不执行 break，直接返回 1，防止游戏收到弹起信号
-			}
-			break; // 【放行信号】走到底部的 return pass
+			return 1;
 		}
+		break;
 
+	
 		// 【功能8：XB1切换映射&Lshift和Lctrl交换映射】
 
 		// Lshift 映射 (Normal -> Ctrl)
@@ -578,7 +569,7 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 						// 【优雅的异步闹钟】
 						// 4 秒后，这个线程会醒来查看“那个人”是否还在
 						std::thread([startTime]() {
-							Sleep(4005);
+							Wait(4000);
 							// 只有当 CpressTime 依然是我们启动时的那个 startTime，才说明没人动过它
 							// 此时踢醒处理线程执行“逻辑 A”进行超时清理
 							if (CpressTime.load() == startTime) {
