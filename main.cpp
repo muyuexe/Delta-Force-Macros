@@ -291,7 +291,7 @@ static void Thread_F_Loop() {
 
 			if (elapsed >= 400) {
 				break; // 达到 300ms，保持 isLongPress 为 true 并退出循环
-		}
+			}
 			Wait(15);
 		}
 		if (isLongPress) {
@@ -324,27 +324,32 @@ static void Thread_Space_Loop() {
 // 【功能 6/7】 鼠标滚轮逻辑
 static void Thread_MW_Loop() {
 	while (WaitForSingleObject(MWevent, INFINITE) == WAIT_OBJECT_0) {
+		// 拿出滚轮增量并重置变量
 		int sDelta = MW.exchange(0);
 
-		// 只有在 isActive 且 sDelta 有效时处理
-		// 注意：能走到这里的信号，一定是 Hook 拦截下来的（XB1没按下时）
 		if (sDelta != 0 && IsTargetActive()) {
 
-			if (sDelta < 0) { // 下滚切换模式
-				ResetAim();
-				M = (M == Shoulder) ? Scope : Shoulder;
-				if (g_hNotifyWnd && IsWindow(g_hNotifyWnd)) {
-					PostMessage(g_hNotifyWnd, WM_USER + 100, 0, 0);
-				}
+			// --- 核心逻辑：在这里处理 B ---
+			if (XB1.load()) {
+				// 按住侧键1时：执行 Tap B
+				Tap('B');
 			}
-			else if (sDelta > 0) { // 上滚执行逻辑
-				if (!RB.load()) {
+			else {
+				// 没按侧键时：执行你原有的切换模式逻辑
+				if (sDelta < 0) { // 下滚
 					ResetAim();
-					BYTE target = (M == Shoulder) ? 'U' : VK_RBUTTON;
-					Press(target);
+					M = (M == Shoulder) ? Scope : Shoulder;
+					if (g_hNotifyWnd) PostMessage(g_hNotifyWnd, WM_USER + 100, 0, 0);
 				}
-				else {
-					S = true;
+				else if (sDelta > 0) { // 上滚
+					if (!RB.load()) {
+						ResetAim();
+						BYTE target = (M == Shoulder) ? 'U' : VK_RBUTTON;
+						Press(target);
+					}
+					else {
+						S = true;
+					}
 				}
 			}
 		}
@@ -681,13 +686,17 @@ static LRESULT CALLBACK MouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
 	case WM_MOUSEWHEEL:
 	{
 		if (isActive) {
-			if (!XB1.load()) {
-				short rDelta = (short)HIWORD(m->mouseData);
-				MW = (int)rDelta;
-				SetEvent(MWevent);
-				return 1; //【功能8：在游戏内：拦截物理信号】
-			}
-			// 如果 XB1 为 true，不执行上述逻辑，直接跳出 switch 执行 Pass
+			// 1. 获取滚轮滚动的增量（向下通常是负数）
+			short rDelta = (short)HIWORD(m->mouseData);
+
+			// 2. 存入原子变量，通知线程有滚动发生
+			MW.store((int)rDelta, std::memory_order_relaxed);
+
+			// 3. 敲门：唤醒 Thread_MW_Loop
+			SetEvent(MWevent);
+
+			// 4. 拦截物理信号：返回1，防止游戏识别到滚轮导致乱切枪
+			return 1;
 		}
 		break;
 	}
