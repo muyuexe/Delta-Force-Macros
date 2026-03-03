@@ -275,12 +275,23 @@ static void Thread_XB2_Loop() {
 static void Thread_F_Loop() {
 	while (WaitForSingleObject(Fevent, INFINITE) == WAIT_OBJECT_0) {
 		bool isLongPress = true;
-		for (int i = 0; i < 20; i++) {
+		auto start_timestamp = std::chrono::steady_clock::now();
+
+		while (true) {
+			// 1. 实时检查按键状态：只要 KF 变为 false，立刻松开按键并跳出
 			if (!KF) {
 				Release('F');
 				isLongPress = false;
 				break;
 			}
+
+			// 2. 检查时间：是否已经达到 300ms
+			auto now = std::chrono::steady_clock::now();
+			auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - start_timestamp).count();
+
+			if (elapsed >= 400) {
+				break; // 达到 300ms，保持 isLongPress 为 true 并退出循环
+		}
 			Wait(15);
 		}
 		if (isLongPress) {
