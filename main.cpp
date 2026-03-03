@@ -226,7 +226,7 @@ static void Thread_Notify_Manager() {
 }
 
 // 【功能 1】 侧键2循环 (保持高精度自旋)
-static void Thread_XB2_Loop() {
+static void Thread_XB2() {
 	while (WaitForSingleObject(XB2event, INFINITE) == WAIT_OBJECT_0) {
 		// 每次唤醒先看一眼黑板
 		if (XB2 && IsTargetActive()) {
@@ -272,7 +272,7 @@ static void Thread_XB2_Loop() {
 }
 
 // 【功能 3】 F键循环
-static void Thread_F_Loop() {
+static void Thread_F() {
 	while (WaitForSingleObject(Fevent, INFINITE) == WAIT_OBJECT_0) {
 		bool isLongPress = true;
 		auto start_timestamp = std::chrono::steady_clock::now();
@@ -312,17 +312,16 @@ static void Thread_F_Loop() {
 }
 
 // 【功能 4】 空格循环
-static void Thread_Space_Loop() {
+static void Thread_Space() {
 	while (WaitForSingleObject(SPACEevent, INFINITE) == WAIT_OBJECT_0) {
 		while (KS && IsTargetActive()) {
 			Tap('G');
-			//Wait(20);
 		}
 	}
 }
 
 // 【功能 6/7】 鼠标滚轮逻辑
-static void Thread_MW_Loop() {
+static void Thread_MW() {
 	while (WaitForSingleObject(MWevent, INFINITE) == WAIT_OBJECT_0) {
 		// 拿出滚轮增量并重置变量
 		int sDelta = MW.exchange(0);
@@ -357,7 +356,7 @@ static void Thread_MW_Loop() {
 }
 
 // 【功能 2/6/7/5】 右键逻辑
-static void Thread_RB_Loop() {
+static void Thread_RB() {
 	// 优雅的无限等待：不占 CPU，由事件精确唤醒
 	while (WaitForSingleObject(RBevent, INFINITE) == WAIT_OBJECT_0) {
 
@@ -447,15 +446,69 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 	// --- 业务逻辑处理 ---
 	switch (vk) {
 		// 【功能8： Q/E 叠加 A/D】
-	case 'Q':
-		if (state && isActive) Press('A');
-		else if (!state) Release('A'); // 松开必须执行，确保复位
-		break;
+	case 'Q': {
+		// 记录本次按下是否处于“拦截模式”
+		static bool qBlocked = false;
 
-	case 'E':
-		if (state && isActive) Press('D');
-		else if (!state) Release('D');
+		if (state) { // WM_KEYDOWN / WM_SYSKEYDOWN
+			if (isActive) {
+				// 仅在物理按下的第一帧进行逻辑判定，规避系统自动重复（Autorepeat）
+				if (!qBlocked) {
+					// 使用 acquire 确保能看到鼠标线程最新的 XB1 状态
+					if (XB1.load(std::memory_order_acquire)) {
+						// 标记拦截：此时不执行 Press('A')，物理 Q 信号由 Pass 宏放行
+						qBlocked = true;
+					}
+					else {
+						// 正常模式：映射 Q 为 A
+						Press('A');
+						// 注意：此处 qBlocked 保持为 false，表示 A 已发出
+					}
+				}
+			}
+		}
+		else { // WM_KEYUP / WM_SYSKEYUP
+			// 只有在之前没有被拦截（即发出了 A）的情况下，才需要复位 A
+			if (!qBlocked) {
+				Release('A');
+			}
+			// 无论哪种模式，松开时必须重置拦截标记，为下一次按下做准备
+			qBlocked = false;
+		}
 		break;
+	}
+
+	case 'E': {
+		// 记录本次按下是否因为 XB1 而拦截了向 D 的映射
+		static bool eBlocked = false;
+
+		if (state) { // WM_KEYDOWN / WM_SYSKEYDOWN
+			if (isActive) {
+				// 判定物理按下的第一帧，规避 Windows 键盘自动重复
+				if (!eBlocked) {
+					// 使用 acquire 语义确保看到最新的侧键状态
+					if (XB1.load(std::memory_order_acquire)) {
+						// 拦截模式：设置标记，不发送 D，物理 E 信号由 Pass 宏放行
+						eBlocked = true;
+					}
+					else {
+						// 正常模式：映射 E 为 D
+						Press('D');
+						// 注意：此时 eBlocked 保持为 false
+					}
+				}
+			}
+		}
+		else { // WM_KEYUP / WM_SYSKEYUP
+			// 只有在按下时真正发出了 D（即未被拦截）的情况下，才需要复位 D
+			if (!eBlocked) {
+				Release('D');
+			}
+			// 重置状态锁，为下次按下做准备
+			eBlocked = false;
+		}
+		break;
+	}
 
 		// 【功能1：记录武器槽位】
 	case '1': case '2': case '4':
@@ -938,11 +991,11 @@ int WINAPI WinMain(
 
 	// 启动线程
 	std::thread(Thread_Notify_Manager).detach();
-	std::thread(Thread_XB2_Loop).detach();
-	std::thread(Thread_F_Loop).detach();
-	std::thread(Thread_Space_Loop).detach();
-	std::thread(Thread_RB_Loop).detach();
-	std::thread(Thread_MW_Loop).detach();
+	std::thread(Thread_XB2).detach();
+	std::thread(Thread_F).detach();
+	std::thread(Thread_Space).detach();
+	std::thread(Thread_RB).detach();
+	std::thread(Thread_MW).detach();
 	std::thread(ActiveWindowMonitor).detach();
 	std::thread(CreateCrosshair).detach();
 	std::thread(MonitorAndExit, L"DeltaForceClient-Win64-Shipping.exe").detach();
