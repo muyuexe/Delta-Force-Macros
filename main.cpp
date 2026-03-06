@@ -323,18 +323,21 @@ static void Thread_Space() {
 // 【功能 6/7】 鼠标滚轮逻辑
 static void Thread_MW() {
 	while (WaitForSingleObject(MWevent, INFINITE) == WAIT_OBJECT_0) {
-		// 拿出滚轮增量并重置变量
 		int sDelta = MW.exchange(0);
-
 		if (sDelta != 0 && IsTargetActive()) {
 
-			// --- 核心逻辑：在这里处理 B ---
-			if (XB1.load()) {
-				// 按住侧键1时：执行 Tap B
-				Tap('B');
+			// --- 情况 A：按住侧键 1 时，直接放行滚动 ---
+			if (XB1.load(std::memory_order_acquire)) {
+				// 形式：Roll(参数, 暗号)
+				Roll(sDelta, AIM_SKIP);
+
+				// 如果是下滚，额外触发一次 Tap B
+				if (sDelta < 0) {
+					Tap('B', AIM_SKIP);
+				}
 			}
+			// --- 情况 B：普通状态 (模式切换逻辑保持不变) ---
 			else {
-				// 没按侧键时：执行你原有的切换模式逻辑
 				if (sDelta < 0) { // 下滚
 					ResetAim();
 					M = (M == Shoulder) ? Scope : Shoulder;
@@ -346,9 +349,7 @@ static void Thread_MW() {
 						BYTE target = (M == Shoulder) ? 'U' : VK_RBUTTON;
 						Press(target);
 					}
-					else {
-						S = true;
-					}
+					else { S = true; }
 				}
 			}
 		}
@@ -739,22 +740,17 @@ static LRESULT CALLBACK MouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
 	case WM_MOUSEWHEEL:
 	{
 		if (isActive) {
-			// 1. 获取滚轮滚动的增量（向下通常是负数）
+			// 关键逻辑：物理滚轮没有注入标志，会被拦截并通知线程
+			// 逻辑 Roll 发出的信号带有 LLMHF_INJECTED，会在 MouseProc 开头被直接 Pass
 			short rDelta = (short)HIWORD(m->mouseData);
-
-			// 2. 存入原子变量，通知线程有滚动发生
 			MW.store((int)rDelta, std::memory_order_relaxed);
-
-			// 3. 敲门：唤醒 Thread_MW_Loop
 			SetEvent(MWevent);
 
-			// 4. 拦截物理信号：返回1，防止游戏识别到滚轮导致乱切枪
-			return 1;
+			return 1; // 拦截物理滚轮
 		}
 		break;
 	}
 	}
-
 	return Pass;
 }
 

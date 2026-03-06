@@ -25,14 +25,26 @@ void SendKey(BYTE vk, bool down, ULONG_PTR extra) {
 void SendMouse(BYTE vk, bool down, ULONG_PTR extra) {
     INPUT input = { 0 };
     input.type = INPUT_MOUSE;
-    input.mi.dwExtraInfo = extra; // 将暗号塞进 Windows 输入流
+    input.mi.dwExtraInfo = extra; // 暗号顺延传递
+
     if (vk == VK_RBUTTON) {
         input.mi.dwFlags = down ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_RIGHTUP;
     }
     else if (vk == VK_LBUTTON) {
         input.mi.dwFlags = down ? MOUSEEVENTF_LEFTDOWN : MOUSEEVENTF_LEFTUP;
     }
+    // 直接用 0 代表滚轮逻辑分支，无需额外定义宏
+    else if (vk == 0) {
+        input.mi.dwFlags = MOUSEEVENTF_WHEEL;
+        input.mi.mouseData = down ? 120 : -120;
+    }
     SendInput(1, &input, sizeof(INPUT));
+}
+
+void Roll(int delta, ULONG_PTR extra) {
+    if (delta == 0) return;
+    // 逻辑：delta > 0 为 true(上)，反之为 false(下)
+    SendMouse(0, (delta > 0), extra);
 }
 
 // 修改 Press / Release / Tap 顺延传递参数

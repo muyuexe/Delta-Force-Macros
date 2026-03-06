@@ -30,3 +30,5 @@ void Release(BYTE vk, ULONG_PTR extra = 0);
 void Tap(BYTE vk, ULONG_PTR extra = 0);
 
 void ResetAim();
+
+void Roll(int delta, ULONG_PTR extra = 0);
