@@ -447,69 +447,15 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 	// --- 业务逻辑处理 ---
 	switch (vk) {
 		// 【功能8： Q/E 叠加 A/D】
-	case 'Q': {
-		// 记录本次按下是否处于“拦截模式”
-		static bool qBlocked = false;
-
-		if (state) { // WM_KEYDOWN / WM_SYSKEYDOWN
-			if (isActive) {
-				// 仅在物理按下的第一帧进行逻辑判定，规避系统自动重复（Autorepeat）
-				if (!qBlocked) {
-					// 使用 acquire 确保能看到鼠标线程最新的 XB1 状态
-					if (XB1.load(std::memory_order_acquire)) {
-						// 标记拦截：此时不执行 Press('A')，物理 Q 信号由 Pass 宏放行
-						qBlocked = true;
-					}
-					else {
-						// 正常模式：映射 Q 为 A
-						Press('A');
-						// 注意：此处 qBlocked 保持为 false，表示 A 已发出
-					}
-				}
-			}
-		}
-		else { // WM_KEYUP / WM_SYSKEYUP
-			// 只有在之前没有被拦截（即发出了 A）的情况下，才需要复位 A
-			if (!qBlocked) {
-				Release('A');
-			}
-			// 无论哪种模式，松开时必须重置拦截标记，为下一次按下做准备
-			qBlocked = false;
-		}
+	case 'Q':
+		if (state && isActive) Press('A');
+		else if (!state) Release('A'); // 松开必须执行，确保复位
 		break;
-	}
 
-	case 'E': {
-		// 记录本次按下是否因为 XB1 而拦截了向 D 的映射
-		static bool eBlocked = false;
-
-		if (state) { // WM_KEYDOWN / WM_SYSKEYDOWN
-			if (isActive) {
-				// 判定物理按下的第一帧，规避 Windows 键盘自动重复
-				if (!eBlocked) {
-					// 使用 acquire 语义确保看到最新的侧键状态
-					if (XB1.load(std::memory_order_acquire)) {
-						// 拦截模式：设置标记，不发送 D，物理 E 信号由 Pass 宏放行
-						eBlocked = true;
-					}
-					else {
-						// 正常模式：映射 E 为 D
-						Press('D');
-						// 注意：此时 eBlocked 保持为 false
-					}
-				}
-			}
-		}
-		else { // WM_KEYUP / WM_SYSKEYUP
-			// 只有在按下时真正发出了 D（即未被拦截）的情况下，才需要复位 D
-			if (!eBlocked) {
-				Release('D');
-			}
-			// 重置状态锁，为下次按下做准备
-			eBlocked = false;
-		}
+	case 'E':
+		if (state && isActive) Press('D');
+		else if (!state) Release('D');
 		break;
-	}
 
 		// 【功能1：记录武器槽位】
 	case '1': case '2': case '4':
