@@ -463,7 +463,16 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 		break;
 
 		// 【功能4】
-	case VK_SPACE: KS = state; SetEvent(SPACEevent); break;
+	case VK_SPACE: 
+		if(!XB1){
+			if(isActive)
+				KS = state; SetEvent(SPACEevent);
+		}
+		else {
+			if (state && isActive) Press('H');
+			else if (!state) Release('H');
+		}
+		break;
 
 		// 【功能3】
 	case 'F':
