@@ -52,6 +52,8 @@ std::atomic<bool> XB2{ false };
 std::atomic<bool> KF{ false };
 // KS： Key Space (空格状态)
 std::atomic<bool> KS{ false };
+// XB1_SPACE： XButton1 + Space (侧键1+空格组合状态)
+std::atomic<bool> XB1_SPACE{ false };
 // 记录C按下时刻的时间戳
 std::atomic<ULONGLONG> CpressTime{ false };
 // RB： Right Button (右键状态)
@@ -280,7 +282,6 @@ static void Thread_F() {
 		while (true) {
 			// 1. 实时检查按键状态：只要 KF 变为 false，立刻松开按键并跳出
 			if (!KF) {
-				Release('F');
 				isLongPress = false;
 				break;
 			}
@@ -463,14 +464,25 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 		break;
 
 		// 【功能4】
-	case VK_SPACE: 
-		if(!XB1){
-			if(isActive)
-				KS = state; SetEvent(SPACEevent);
+	case VK_SPACE:
+		if (state) {
+			if (XB1) {
+				XB1_SPACE = true;
+				if (isActive) Press('H');
+			}
+			else if (isActive) {
+				KS = true;
+				SetEvent(SPACEevent);
+			}
 		}
 		else {
-			if (state && isActive) Press('H');
-			else if (!state) Release('H');
+			if (KS) {
+				KS = false;
+			}
+			else if (XB1_SPACE) {
+				XB1_SPACE = false;
+				Release('H');
+			}
 		}
 		break;
 
@@ -482,7 +494,6 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 		}
 		else if (!state) {
 			KF = false;
-			return 1;
 		}
 		break;
 
