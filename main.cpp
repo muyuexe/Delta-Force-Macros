@@ -502,76 +502,116 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 
 		// Lshift 映射 (Normal -> Ctrl)
 	case VK_LSHIFT: {
-		static bool pCtrl = false;
-
-		if (state && isActive) {
-			Press(VK_LCONTROL); pCtrl = true; return 1;
-		} // 普通模式下：映射为 Ctrl
-		else if (!state) {
-			if (pCtrl) { Release(VK_LCONTROL); pCtrl = false; return 1; }
+		static bool shiftHooked = false;
+		if (state) {
+			// 游戏激活且不是 XB1 模式（假设 Normal 模式下交换）
+			if (!shiftHooked && isActive && !XB1) {
+				Press(VK_LCONTROL);
+				shiftHooked = true;
+			}
+			if (shiftHooked) return 1;
+		}
+		else {
+			if (shiftHooked) {
+				Release(VK_LCONTROL);
+				shiftHooked = false;
+				return 1;
+			}
 		}
 		break;
 	}
 
 				  // LControl 映射 (XB1 -> M | Normal -> Lshift)
 	case VK_LCONTROL: {
-		static bool pM = false, pShift = false;
+		static bool ctrlToM = false;
+		static bool ctrlToShift = false;
 
-		if (state && isActive) {
-			if (XB1) {
-				Press('M'); pM = true; return 1;
-			} // XB1模式下：映射为 M
-			else {
-				Press(VK_LSHIFT); pShift = true; return 1;
-			} // 普通模式下：映射为 Lshift
-
+		if (state) {
+			if (!ctrlToM && !ctrlToShift && isActive) {
+				if (XB1) {
+					Press('M');
+					ctrlToM = true;
+				}
+				else {
+					Press(VK_LSHIFT);
+					ctrlToShift = true;
+				}
+			}
+			if (ctrlToM || ctrlToShift) return 1;
 		}
-		else if (!state) {
-			if (pM) { Release('M'); pM = false; return 1; }
-			if (pShift) { Release(VK_LSHIFT); pShift = false; return 1; }
+		else {
+			if (ctrlToM) {
+				Release('M');
+				ctrlToM = false;
+				return 1;
+			}
+			if (ctrlToShift) {
+				Release(VK_LSHIFT);
+				ctrlToShift = false;
+				return 1;
+			}
 		}
 		break;
 	}
 
 					// CapsLock 映射 (XB1 -> N)
 	case VK_CAPITAL: {
-		static bool pN = false;
-
-		if (state && isActive) {
-			if (XB1) { Press('N'); pN = true; return 1; } // XB1模式下：映射为 N
+		static bool capsHooked = false;
+		if (state) {
+			if (!capsHooked && isActive && XB1) {
+				Press('N');
+				capsHooked = true;
+			}
+			if (capsHooked) return 1;
 		}
-		else if (!state) {
-			if (pN) { Release('N'); pN = false; return 1; }
+		else {
+			if (capsHooked) {
+				Release('N');
+				capsHooked = false;
+				return 1;
+			}
 		}
 		break;
 	}
 
 				   // X 键映射 (XB1 -> 句号 .)
 	case 'X': {
-		static bool pDot = false;
+		static bool xHooked = false; // 记录本次按下是否被拦截
 
-		if (state && isActive && XB1) {
-			Press(VK_OEM_PERIOD); // 映射为句号
-			pDot = true;
-			return 1;
+		if (state) {
+			// 只有在没被接管、在游戏内、且满足 XB1 模式时才开始拦截
+			if (!xHooked && isActive && XB1) {
+				Press(VK_OEM_PERIOD);
+				xHooked = true;
+			}
+			if (xHooked) return 1; // 拦截所有重复的 Down 信号
 		}
-		else if (!state) {
-			if (pDot) { Release(VK_OEM_PERIOD); pDot = false; return 1; }
+		else {
+			if (xHooked) {
+				Release(VK_OEM_PERIOD);
+				xHooked = false; // 必须先重置状态
+				return 1; // 拦截松开信号
+			}
 		}
 		break;
 	}
 
 			// Tab 键映射 (XB1 -> 分号 ;)
 	case VK_TAB: {
-		static bool pSemi = false;
-
-		if (state && isActive && XB1) {
-			Press(VK_OEM_1); // 映射为分号 (;)
-			pSemi = true;
-			return 1;
+		static bool tabHooked = false;
+		if (state) {
+			if (!tabHooked && isActive && XB1) {
+				Press(VK_OEM_1);
+				tabHooked = true;
+			}
+			if (tabHooked) return 1;
 		}
-		else if (!state) {
-			if (pSemi) { Release(VK_OEM_1); pSemi = false; return 1; }
+		else {
+			if (tabHooked) {
+				Release(VK_OEM_1);
+				tabHooked = false;
+				return 1;
+			}
 		}
 		break;
 	}
