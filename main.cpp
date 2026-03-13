@@ -55,7 +55,7 @@ std::atomic<bool> KS{ false };
 // XB1_SPACE： XButton1 + Space (侧键1+空格组合状态)
 std::atomic<bool> XB1_SPACE{ false };
 // 记录C按下时刻的时间戳
-std::atomic<ULONGLONG> CpressTime{ false };
+std::atomic<ULONGLONG> CpressTime{ 0 };
 // RB： Right Button (右键状态)
 std::atomic<bool> RB{ false };
 // MW： Mouse Wheel (滚轮信号)
@@ -373,72 +373,34 @@ static void Thread_MW() {
 
 // 【功能 2/6/7/5】 右键逻辑
 static void Thread_RB() {
-	// 优雅的无限等待：不占 CPU，由事件精确唤醒
 	while (WaitForSingleObject(RBevent, INFINITE) == WAIT_OBJECT_0) {
+		if (!IsTargetActive()) continue;
 
-		bool isActive = IsTargetActive();
-		ULONGLONG now = GetTickCount64();
-
-		// 先读取当前令牌的值
-		ULONGLONG lastC = CpressTime.load(std::memory_order_relaxed);
-
-		// --- 逻辑 A：爆闪倒计时自然超时检测 ---
-		if (lastC > 0 && (now - lastC >= 4000)) {
-			// 【原子竞争点】尝试将时间戳从 lastC 归零
-			// 如果成功，说明这一瞬间没有其他线程（右键或C键）动过它
-			ULONGLONG expected = lastC;
-			if (CpressTime.compare_exchange_strong(expected, 0)) {
-				if (isActive && g_hNotifyWnd) {
-					PostMessage(g_hNotifyWnd, WM_USER + 101, 0, 0);
-				}
-			}
-		}
-
-		// 重新获取最新的令牌状态，因为可能在上面已被清零
-		lastC = CpressTime.load(std::memory_order_relaxed);
-
-		if (!isActive) continue;
-
-		bool isAiming = (Aim.u.load() || Aim.r.load());
-
-		// --- 逻辑 B：C键极短时间连携 (先右后C 50ms内) ---
-		if (isAiming && lastC > 0 && (now - lastC < 50)) {
-			ULONGLONG exp = lastC;
-			if (CpressTime.compare_exchange_strong(exp, 0)) {
-				Tap(VK_OEM_COMMA);
-			}
-		}
-
-		// --- 逻辑 C：右键常规动作逻辑 ---
 		if (RB.load()) {
-			// 右键按下时，若处于 4s 爆闪有效期内，则触发 C 键连带动作
-			lastC = CpressTime.load(std::memory_order_relaxed); // 获取最新状态
-			if (lastC > 0 && (now - lastC <= 4000)) {
-				ULONGLONG exp = lastC;
-				if (CpressTime.compare_exchange_strong(exp, 0)) {
+			// --- 逻辑：检查通行证 ---
+			// 只要 CpressTime > 0，就说明有通行证（由临时工控制 4 秒后自动归零）
+			ULONGLONG lastC = CpressTime.load(std::memory_order_relaxed);
+			if (lastC > 0) {
+				if (CpressTime.compare_exchange_strong(lastC, 0)) {
 					Tap(VK_OEM_COMMA);
 				}
 			}
 
+			// --- 核心右键动作 ---
 			Press('H');
 			ResetAim();
 			if (M == Shoulder) {
 				Press('U');
-				// 异步模拟物理点击，防止 UI 或系统延迟阻塞此核心循环
-				std::thread([]() {
-					Wait(10);
-					Tap(VK_RBUTTON, AIM_SKIP);
-					}).detach();
+				std::thread([]() { Wait(10); Tap(VK_RBUTTON, AIM_SKIP); }).detach();
 			}
 			else {
 				Press(VK_RBUTTON);
 			}
 		}
 		else {
-			// 右键松开：收尾清空状态
+			// 右键松开收尾
 			Release('H');
-			if (S) S = false;
-			else ResetAim();
+			if (S) S = false; else ResetAim();
 		}
 	}
 }
@@ -681,55 +643,59 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 	}
 
 
-			   // 【功能5：战术 C 键】
+			// 【功能5：战术 C 键】
 	case 'C': {
-		// 1. 状态追踪变量
-		static bool C_input = false;      // 防止系统自动连发（Auto-repeat）重复触发逻辑
-		static bool isIntercepted = false; // 记录本次物理按下是否被拦截，用于指导松开时的行为
+		static bool C_input = false;
+		static bool isIntercepted = false;
 
-		if (state) { // KeyDown 逻辑
-			if (isActive && !XB1) {
-				if (!C_input) {
-					C_input = true;
-					isIntercepted = true;
+		if (state) { // KeyDown
+			// 1. 状态锁：只有物理按下且非 XB1 模式才进入
+			if (isActive && !XB1 && !C_input) {
+				C_input = true;
+				isIntercepted = true;
 
-					// --- 业务核心：爆闪/计时逻辑 ---
-					// 原子操作：取出旧令牌并设为 0。
+				// 2. 判定基准：完全信任用户输入的 RB 记录
+				if (RB.load(std::memory_order_relaxed)) {
+					// --- 连携模式 ---
+					// 只要右键是按下的，直接触发，并确保作废之前的通行证（如果有）
+					CpressTime.store(0);
+					Tap(VK_OEM_COMMA);
+				}
+				else {
+					// --- 通行证/计时模式 ---
+					// 使用 exchange(0) 实现：如果正在计时，则取出时间戳并清零（手动终止）
 					ULONGLONG oldTime = CpressTime.exchange(0);
 
 					if (oldTime > 0) {
-						// 如果旧值 > 0，说明之前在计时中，现在手动提前关闭
-						if (g_hNotifyWnd) {
+						// 情况：重复按下 C，销毁当前计时
+						if (g_hNotifyWnd && IsTargetActive()) {
 							PostMessage(g_hNotifyWnd, WM_USER + 101, 0, 0);
 						}
 					}
 					else {
-						// 开启新爆闪计时
+						// 情况：开启新计时
 						ULONGLONG startTime = GetTickCount64();
 						CpressTime.store(startTime);
-						SetEvent(RBevent);
 
-						// 异步监控线程
 						std::thread([startTime]() {
-							Wait(4000);
-							if (CpressTime.load() == startTime) {
-								SetEvent(RBevent);
+							Wait(4000); // 4秒寿命
+							ULONGLONG expected = startTime;
+							// compare_exchange_strong 确保：
+							// 如果 4 秒内没被 Thread_RB 用掉，也没被重复按 C 销毁，才执行过期提示
+							if (CpressTime.compare_exchange_strong(expected, 0)) {
+								if (g_hNotifyWnd && IsTargetActive()) {
+									PostMessage(g_hNotifyWnd, WM_USER + 101, 0, 0);
+								}
 							}
 							}).detach();
 					}
 				}
-				return 1; // 物理信号拦截
-			}
-		}
-		else { // KeyUp 逻辑
-			// 【关键修复】无条件重置输入锁。无论当前窗口是否激活，必须确保下次按下能进入逻辑。
-			C_input = false;
-
-			// 【关键修复】对称拦截。只有当按下时被拦截了，松开时才拦截物理信号，防止系统键位状态失控。
-			if (isIntercepted) {
-				isIntercepted = false;
 				return 1;
 			}
+		}
+		else { // KeyUp
+			C_input = false; // 释放状态锁
+			if (isIntercepted) { isIntercepted = false; return 1; }
 		}
 		break;
 	}
