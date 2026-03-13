@@ -578,20 +578,23 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 
 
 			   // 【功能5：战术 C 键】
-	case 'C':
-		if (isActive && !XB1) {
-			// 状态锁：处理系统长按重复消息，确保单次按下只触发一次逻辑
-			static bool C_input = false;
+	case 'C': {
+		// 1. 状态追踪变量
+		static bool C_input = false;      // 防止系统自动连发（Auto-repeat）重复触发逻辑
+		static bool isIntercepted = false; // 记录本次物理按下是否被拦截，用于指导松开时的行为
 
-			if (state) { // 按下 C 键
+		if (state) { // KeyDown 逻辑
+			if (isActive && !XB1) {
 				if (!C_input) {
 					C_input = true;
+					isIntercepted = true;
 
-					// 【原子操作】取出旧令牌并设为 0。这一步直接完成了“逻辑锁定”
+					// --- 业务核心：爆闪/计时逻辑 ---
+					// 原子操作：取出旧令牌并设为 0。
 					ULONGLONG oldTime = CpressTime.exchange(0);
 
 					if (oldTime > 0) {
-						// 如果旧值 > 0，说明之前在爆闪中，现在是“手动提前关闭”
+						// 如果旧值 > 0，说明之前在计时中，现在手动提前关闭
 						if (g_hNotifyWnd) {
 							PostMessage(g_hNotifyWnd, WM_USER + 101, 0, 0);
 						}
@@ -600,28 +603,32 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 						// 开启新爆闪计时
 						ULONGLONG startTime = GetTickCount64();
 						CpressTime.store(startTime);
-						SetEvent(RBevent); // 唤醒线程进行初始逻辑判断
+						SetEvent(RBevent);
 
-						// 【优雅的异步闹钟】
-						// 4 秒后，这个线程会醒来查看“那个人”是否还在
+						// 异步监控线程
 						std::thread([startTime]() {
 							Wait(4000);
-							// 只有当 CpressTime 依然是我们启动时的那个 startTime，才说明没人动过它
-							// 此时踢醒处理线程执行“逻辑 A”进行超时清理
 							if (CpressTime.load() == startTime) {
 								SetEvent(RBevent);
 							}
 							}).detach();
 					}
 				}
-				return 1;
+				return 1; // 物理信号拦截
 			}
-			else { // 松开 C 键
-				C_input = false;
+		}
+		else { // KeyUp 逻辑
+			// 【关键修复】无条件重置输入锁。无论当前窗口是否激活，必须确保下次按下能进入逻辑。
+			C_input = false;
+
+			// 【关键修复】对称拦截。只有当按下时被拦截了，松开时才拦截物理信号，防止系统键位状态失控。
+			if (isIntercepted) {
+				isIntercepted = false;
 				return 1;
 			}
 		}
 		break;
+	}
 
 	}
 	return Pass;
