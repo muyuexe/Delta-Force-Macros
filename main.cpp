@@ -71,6 +71,12 @@ HWND g_hNotifyWnd = NULL; // UI全局句柄
 // 记录主线程 ID，用于跨线程通信
 DWORD g_mainThreadId = 0;
 
+//1.4.4更改
+HANDLE QEevent, SpaceExitEvent;
+std::atomic<bool> KQ{ false };
+std::atomic<bool> KE{ false };
+std::atomic<int> SpaceLock{ 0 }; // 0:空闲, 1:运行中, 2:待终止
+
 
 // --- 进程检测(100ms) ---
 
@@ -315,9 +321,17 @@ static void Thread_F() {
 // 【功能 4】 空格循环
 static void Thread_Space() {
 	while (WaitForSingleObject(SPACEevent, INFINITE) == WAIT_OBJECT_0) {
+		SpaceLock.store(1);
+
 		while (KS && IsTargetActive()) {
+			if (SpaceLock.load() == 2) break; // 收到打断请求
+
 			Tap('G');
+			// 此处按需保留 Wait(15);
 		}
+
+		SpaceLock.store(0);
+		SetEvent(SpaceExitEvent); // 【关键】发送握手确认信号
 	}
 }
 
@@ -429,6 +443,24 @@ static void Thread_RB() {
 	}
 }
 
+// 【功能 ？】 Q/E逻辑
+static void Thread_QE() {
+	while (WaitForSingleObject(QEevent, INFINITE) == WAIT_OBJECT_0) {
+		// 如果当前正在处理按下逻辑，且空格正在被打断，则挂起等待
+		if ((KQ || KE) && SpaceLock.load() == 2) {
+			WaitForSingleObject(SpaceExitEvent, 100);
+		}
+
+		if (IsTargetActive()) {
+			// 处理 Q 物理键对应的逻辑 Q
+			if (KQ.load()) Press('Q'); else Release('Q');
+
+			// 处理 E 物理键对应的逻辑 E
+			if (KE.load()) Press('E'); else Release('E');
+		}
+	}
+}
+
 
 // --- Hook 回调逻辑 ---
 
@@ -447,41 +479,73 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 
 	// --- 业务逻辑处理 ---
 	switch (vk) {
-		// 【功能8： Q/E 叠加 A/D】
+		// 【功能8： Q/E 叠加 A/D 且打断逻辑】
 	case 'Q':
-		if (state && isActive) Press('A');
-		else if (!state) Release('A'); // 松开必须执行，确保复位
-		break;
+	case 'E': {
+		bool isQ = (vk == 'Q');
+		if (state) { // KeyDown
+			if (isActive) {
+				// --- 1. Hook层立即执行：叠加 A/D ---
+				if (isQ) {
+					if (KQ.load()) return 1; // 防止连发
+					KQ = true;
+					Press('A');
+				}
+				else {
+					if (KE.load()) return 1;
+					KE = true;
+					Press('D');
+				}
 
-	case 'E':
-		if (state && isActive) Press('D');
-		else if (!state) Release('D');
+				// --- 2. 打断握手逻辑 ---
+				int expected = 1;
+				if (!SpaceLock.compare_exchange_strong(expected, 2)) {
+					SetEvent(SpaceExitEvent); // 空格没在跑，直接给通过信号
+				}
+				SetEvent(QEevent); // 唤醒 QE 线程执行后续动作
+				return 1;
+			}
+		}
+		else { // KeyUp
+			if (isQ) {
+				KQ = false;
+				Release('A'); // Hook层立即释放 A
+			}
+			else {
+				KE = false;
+				Release('D'); // Hook层立即释放 D
+			}
+			SetEvent(QEevent); // 唤醒线程处理 Q/E 的释放
+			if (isActive) return 1;
+		}
 		break;
+	}
 
-		// 【功能1：记录武器槽位】
+			// 【功能1：记录武器槽位】
 	case '1': case '2': case '4':
 		if (state && isActive) Num = (vk == '1' ? 1 : (vk == '2' ? 2 : 4));
 		break;
 
-		// 【功能4】
+		// 【功能4：空格逻辑】
 	case VK_SPACE:
-		if (state) {
-			if (XB1) {
-				XB1_SPACE = true;
-				if (isActive) Press('H');
-			}
-			else if (isActive) {
-				KS = true;
-				SetEvent(SPACEevent);
+		if (state) { // 按下状态
+			if (isActive) {
+				if (XB1) {
+					Press('C');
+					XB1_SPACE = true;
+				}
+				if (!KS) {
+					KS = true;
+					ResetEvent(SpaceExitEvent);
+					SetEvent(SPACEevent);
+				}
 			}
 		}
-		else {
-			if (KS) {
-				KS = false;
-			}
-			else if (XB1_SPACE) {
+		else { // 抬起状态
+			KS = false;
+			if (XB1_SPACE) {
 				XB1_SPACE = false;
-				Release('H');
+				Release('C');
 			}
 		}
 		break;
@@ -497,7 +561,7 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 		}
 		break;
 
-	
+
 		// 【功能8：XB1切换映射&Lshift和Lctrl交换映射】
 
 		// Lshift 映射 (Normal -> Ctrl)
@@ -990,6 +1054,8 @@ int WINAPI WinMain(
 	SPACEevent = CreateEvent(NULL, FALSE, FALSE, NULL);
 	RBevent = CreateEvent(NULL, FALSE, FALSE, NULL);
 	XB2event = CreateEvent(NULL, FALSE, FALSE, NULL);
+	QEevent = CreateEvent(NULL, FALSE, FALSE, NULL);
+	SpaceExitEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
 
 	timeBeginPeriod(1);// 提升定时器精度至1ms
 
@@ -1008,6 +1074,7 @@ int WINAPI WinMain(
 	std::thread(ActiveWindowMonitor).detach();
 	std::thread(CreateCrosshair).detach();
 	std::thread(MonitorAndExit, L"DeltaForceClient-Win64-Shipping.exe").detach();
+	std::thread(Thread_QE).detach();
 
 	// 安装 Hook：确保鼠标和键盘全局监控
 	HHOOK kHook = SetWindowsHookEx(WH_KEYBOARD_LL, KeyboardProc, NULL, 0);
