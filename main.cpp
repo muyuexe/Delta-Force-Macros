@@ -448,6 +448,9 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 	case 'Q':
 	case 'E': {
 		bool isQ = (vk == 'Q');
+		static bool qHooked = false; // 专门记录 Q 的拦截状态
+		static bool eHooked = false; // 专门记录 E 的拦截状态
+
 		if (state) { // KeyDown
 			if (isActive) {
 				// --- 1. Hook层立即执行：叠加 A/D ---
@@ -455,11 +458,13 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 					if (KQ.load()) return 1; // 防止连发
 					KQ = true;
 					Press('A');
+					qHooked = true;
 				}
 				else {
 					if (KE.load()) return 1;
 					KE = true;
 					Press('D');
+					eHooked = true;
 				}
 
 				// --- 2. 打断握手逻辑 ---
@@ -468,20 +473,23 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 					SetEvent(SpaceExitEvent); // 空格没在跑，直接给通过信号
 				}
 				SetEvent(QEevent); // 唤醒 QE 线程执行后续动作
-				return 1;
+				return 1; // 游戏内按下：必须拦截
 			}
 		}
 		else { // KeyUp
+			// --- 逻辑复位：无论是否在游戏内，必须确保内部状态正确 ---
 			if (isQ) {
 				KQ = false;
 				Release('A'); // Hook层立即释放 A
+				SetEvent(QEevent);
+				if (qHooked) { qHooked = false; return 1; } // 【对称拦截】
 			}
 			else {
 				KE = false;
 				Release('D'); // Hook层立即释放 D
+				SetEvent(QEevent);
+				if (eHooked) { eHooked = false; return 1; } // 【对称拦截】
 			}
-			SetEvent(QEevent); // 唤醒线程处理 Q/E 的释放
-			if (isActive) return 1;
 		}
 		break;
 	}
@@ -495,10 +503,12 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 	case VK_SPACE:
 		if (state) { // 按下状态
 			if (isActive) {
+				// --- 业务逻辑：XB1 映射 ---
 				if (XB1) {
 					Press('C');
 					XB1_SPACE = true;
 				}
+				// --- 业务逻辑：唤醒线程 ---
 				if (!KS) {
 					KS = true;
 					ResetEvent(SpaceExitEvent);
@@ -534,7 +544,7 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 		static bool shiftHooked = false;
 		if (state) {
 			// 游戏激活且不是 XB1 模式（假设 Normal 模式下交换）
-			if (!shiftHooked && isActive && !XB1) {
+			if (!shiftHooked && isActive) {
 				Press(VK_LCONTROL);
 				shiftHooked = true;
 			}
