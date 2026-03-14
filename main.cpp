@@ -374,31 +374,34 @@ static void Thread_MW() {
 // 【功能 2/6/7/5】 右键逻辑
 static void Thread_RB() {
 	while (WaitForSingleObject(RBevent, INFINITE) == WAIT_OBJECT_0) {
-		if (!IsTargetActive()) continue;
 
 		if (RB.load()) {
-			// --- 逻辑：检查通行证 ---
-			// 只要 CpressTime > 0，就说明有通行证（由临时工控制 4 秒后自动归零）
-			ULONGLONG lastC = CpressTime.load(std::memory_order_relaxed);
-			if (lastC > 0) {
-				if (CpressTime.compare_exchange_strong(lastC, 0)) {
-					Tap(VK_OEM_COMMA);
+			// --- 按下逻辑 ---
+			// 仅在目标窗口激活时才执行核心操作
+			if (IsTargetActive()) {
+				// --- 逻辑：检查通行证 ---
+				ULONGLONG lastC = CpressTime.load(std::memory_order_relaxed);
+				if (lastC > 0) {
+					if (CpressTime.compare_exchange_strong(lastC, 0)) {
+						Tap(VK_OEM_COMMA);
+					}
 				}
-			}
 
-			// --- 核心右键动作 ---
-			Press('H');
-			ResetAim();
-			if (M == Shoulder) {
-				Press('U');
-				std::thread([]() { Wait(10); Tap(VK_RBUTTON, AIM_SKIP); }).detach();
-			}
-			else {
-				Press(VK_RBUTTON);
+				// --- 核心右键动作 ---
+				Press('H');
+				ResetAim();
+				if (M == Shoulder) {
+					Press('U');
+					std::thread([]() { Wait(10); Tap(VK_RBUTTON, AIM_SKIP); }).detach();
+				}
+				else {
+					Press(VK_RBUTTON);
+				}
 			}
 		}
 		else {
-			// 右键松开收尾
+			// --- 松开逻辑 ---
+			// 无视窗口状态，只要 RB 为 false（物理按键松开），必须执行清理
 			Release('H');
 			if (S) S = false; else ResetAim();
 		}
@@ -724,16 +727,23 @@ static LRESULT CALLBACK MouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
 		bool state = (wParam == WM_XBUTTONDOWN);
 		int xNum = HIWORD(m->mouseData);
 
+		static bool x1Hooked = false;
+		static bool x2Hooked = false;
+
 		if (xNum == 1) {
 			// 侧键 1 处理
-			if (state && isActive) {
-				XB1 = true;
+			if (state) {
+				if (isActive) {
+					XB1 = true;
+					x1Hooked = true;
+				}
 			}
-			else if (!state) {
+			else {
 				XB1 = false; // 松开：同步状态
+				if (x1Hooked) { x1Hooked = false; return 1; }
 			}
 
-			if (isActive) return 1; // 【功能8：在游戏内：拦截物理信号（无论按下还是松开）】
+			if (x1Hooked) return 1; // 【功能8：在游戏内：拦截物理信号（无论按下还是松开）】
 			break; // 非游戏内，跳出 switch 执行最后的 Pass
 		}
 
@@ -743,14 +753,16 @@ static LRESULT CALLBACK MouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
 				if (isActive) {
 					XB2 = true;
 					SetEvent(XB2event); // 唤醒连招线程
+					x2Hooked = true;
 				}
 			}
 			else {
 				XB2 = false; // 松开：让线程通过 while 判断熄火
 				SetEvent(XB2event); // 再次触发事件确保线程从 Wait 中醒来检查 XB2 状态
+				if (x2Hooked) { x2Hooked = false; return 1; }
 			}
 
-			if (isActive) return 1; // 【功能8：在游戏内：拦截物理信号】
+			if (x2Hooked) return 1; // 【功能8：在游戏内：拦截物理信号】
 			break;
 		}
 		break;
@@ -761,6 +773,7 @@ static LRESULT CALLBACK MouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
 	case WM_RBUTTONUP:
 	{
 		bool state = (wParam == WM_RBUTTONDOWN);
+		static bool rbHooked = false;
 
 		// 只有在 isActive 时才允许“按下”逻辑生效
 		// 但“松开”逻辑必须始终同步，以确保 Thread_RB_Loop 能够执行 Release('H') 等收尾
@@ -768,13 +781,17 @@ static LRESULT CALLBACK MouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
 			if (isActive) {
 				RB = true;
 				SetEvent(RBevent);
+				rbHooked = true;
 				return 1; // 拦截物理按下
 			}
 		}
 		else {
 			RB = false;
 			SetEvent(RBevent);
-			if (isActive) return 1; // 在游戏内松开：拦截
+			if (rbHooked) {
+				rbHooked = false;
+				return 1; // 在游戏内松开：拦截
+			}
 		}
 		break;
 	}
