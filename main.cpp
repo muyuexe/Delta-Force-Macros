@@ -405,18 +405,63 @@ static void Thread_RB() {
 
 // 【功能 ？】 Q/E逻辑
 static void Thread_QE() {
-	while (WaitForSingleObject(QEevent, INFINITE) == WAIT_OBJECT_0) {
-		// 如果当前正在处理按下逻辑，且空格正在被打断，则挂起等待
-		if ((KQ || KE) && SpaceLock.load() == 2) {
-			WaitForSingleObject(SpaceExitEvent, 100);
+
+	const int X_MS = 333; // A/D 连携的最大持续时间（毫秒）
+	static long long QPushTime = 0;  // Q 按下的起始时间戳
+	static long long EPushTime = 0;  // E 按下的起始时间戳
+	static bool isALocked = false;    // 逻辑 A 是否处于模拟按下状态
+	static bool isDLocked = false;    // 逻辑 D 是否处于模拟按下状态
+
+	while (true) {
+		// 动态计算等待时间：若有键按下，10ms 轮询一次；否则无限等待唤醒
+		DWORD waitTime = (KQ || KE) ? 10 : INFINITE;
+		WaitForSingleObject(QEevent, waitTime);
+
+		long long now = (long long)GetTickCount64();
+
+		// --- Q 及其连带 A 的独立逻辑 ---
+		if (KQ.load()) {
+			if (QPushTime == 0) {
+				// 按下瞬间：记录时间并同步按下 A 和 Q
+				QPushTime = now;
+				isALocked = true;
+				Press('A');
+				Press('Q');
+			}
+			else if (isALocked && (now - QPushTime >= X_MS)) {
+				// 超时限制：仅松开连带键 A
+				Release('A');
+				isALocked = false;
+			}
+			// 注意：只要物理键 KQ 为 true，此处不需要反复执行 Press('Q')
+		}
+		else {
+			// 物理键已松开：清理所有相关状态
+			if (isALocked) { Release('A'); isALocked = false; }
+			if (QPushTime != 0) { Release('Q'); QPushTime = 0; }
 		}
 
-		if (IsTargetActive()) {
-			// 处理 Q 物理键对应的逻辑 Q
-			if (KQ.load()) Press('Q'); else Release('Q');
+		// --- E 及其连带 D 的独立逻辑 ---
+		if (KE.load()) {
+			if (EPushTime == 0) {
+				EPushTime = now;
+				isDLocked = true;
+				Press('D');
+				Press('E');
+			}
+			else if (isDLocked && (now - EPushTime >= X_MS)) {
+				Release('D');
+				isDLocked = false;
+			}
+		}
+		else {
+			if (isDLocked) { Release('D'); isDLocked = false; }
+			if (EPushTime != 0) { Release('E'); EPushTime = 0; }
+		}
 
-			// 处理 E 物理键对应的逻辑 E
-			if (KE.load()) Press('E'); else Release('E');
+		// --- 原有空格打断逻辑 ---
+		if ((KQ || KE) && SpaceLock.load() == 2) {
+			WaitForSingleObject(SpaceExitEvent, 100);
 		}
 	}
 }
@@ -443,48 +488,32 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 	case 'Q':
 	case 'E': {
 		bool isQ = (vk == 'Q');
-		static bool qHooked = false; // 专门记录 Q 的拦截状态
-		static bool eHooked = false; // 专门记录 E 的拦截状态
-
-		if (state) { // KeyDown
+		if (state) { // KeyDown (物理按下)
 			if (isActive) {
-				// --- 1. Hook层立即执行：叠加 A/D ---
 				if (isQ) {
-					if (KQ.load()) return 1; // 防止连发
+					if (KQ.load()) return 1; // 屏蔽系统连发
 					KQ = true;
-					Press('A');
-					qHooked = true;
 				}
 				else {
 					if (KE.load()) return 1;
 					KE = true;
-					Press('D');
-					eHooked = true;
 				}
 
-				// --- 2. 打断握手逻辑 ---
+				// --- 打断握手逻辑 ---
 				int expected = 1;
 				if (!SpaceLock.compare_exchange_strong(expected, 2)) {
-					SetEvent(SpaceExitEvent); // 空格没在跑，直接给通过信号
+					SetEvent(SpaceExitEvent);
 				}
-				SetEvent(QEevent); // 唤醒 QE 线程执行后续动作
-				return 1; // 游戏内按下：必须拦截
+
+				SetEvent(QEevent); // 唤醒轮询线程
+				return 1;
 			}
 		}
-		else { // KeyUp
-			// --- 逻辑复位：无论是否在游戏内，必须确保内部状态正确 ---
-			if (isQ) {
-				KQ = false;
-				Release('A'); // Hook层立即释放 A
-				SetEvent(QEevent);
-				if (qHooked) { qHooked = false; return 1; } // 【对称拦截】
-			}
-			else {
-				KE = false;
-				Release('D'); // Hook层立即释放 D
-				SetEvent(QEevent);
-				if (eHooked) { eHooked = false; return 1; } // 【对称拦截】
-			}
+		else { // KeyUp (物理松开)
+			if (isQ) KQ = false; else KE = false;
+
+			SetEvent(QEevent); // 唤醒线程处理清理逻辑
+			return 1;
 		}
 		break;
 	}
