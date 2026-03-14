@@ -283,36 +283,31 @@ static void Thread_XB2() {
 static void Thread_F() {
 	while (WaitForSingleObject(Fevent, INFINITE) == WAIT_OBJECT_0) {
 		bool isLongPress = true;
+
+		// A. 模拟默认输出：由于物理信号被 Hook 拦截，此处手动补发 Press
+		Press('F');
 		auto start_timestamp = std::chrono::steady_clock::now();
 
-		while (true) {
-			// 1. 实时检查按键状态：只要 KF 变为 false，立刻松开按键并跳出
-			if (!KF) {
-				isLongPress = false;
-				break;
-			}
-
-			// 2. 检查时间：是否已经达到 200ms
+		while (KF) {
+			// 检查时间：是否已经达到 200ms
 			auto now = std::chrono::steady_clock::now();
-			auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - start_timestamp).count();
-
-			if (elapsed >= 200) {
-				break; // 达到 200ms，保持 isLongPress 为 true 并退出循环
+			if (std::chrono::duration_cast<std::chrono::milliseconds>(now - start_timestamp).count() >= 200) {
+				break; // 达到 200ms，保持 isLongPress 为 true 并退出计时循环
 			}
 			Wait(15);
 		}
+
+		// 如果是因为 KF 变为 false（用户松开）跳出的循环
+		if (!KF) isLongPress = false;
+
+		// B. 终止当前的 F 状态：无论是松开还是准备转入连击，都需先 Release
+		Release('F');
+
+		// C. 超出 200ms 则启动连击
 		if (isLongPress) {
-			if (!XB1) {
-				while (KF && IsTargetActive()) {
-					Tap('F');
-					Wait(15);
-				}
-			}
-			else {
-				while (KF && IsTargetActive()) {
-					Wait(15);
-				}
-				Release('F');
+			while (KF && IsTargetActive()) {
+				Tap('F');
+				Wait(15);
 			}
 		}
 	}
@@ -526,16 +521,30 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 		break;
 
 		// 【功能3】
-	case 'F':
-		if (state && isActive && !KF) {
-			KF = true;
-			SetEvent(Fevent);
+	case 'F': {
+		static bool fHooked = false; // 状态锁：用于屏蔽 Win 自动重复输入
+		if (state) {
+			// 瞬间判定：仅在按下的第一帧且游戏处于激活状态时进行逻辑分流
+			if (!fHooked && isActive) {
+				if (!XB1) {
+					fHooked = true;
+					KF = true;
+					SetEvent(Fevent);
+				}
+			}
+			// 如果处于 Hook 锁定状态，拦截后续所有物理按下消息（包括 Auto-Repeat）
+			if (fHooked) return 1;
 		}
-		else if (!state) {
-			KF = false;
+		else {
+			// 释放判定
+			if (fHooked) {
+				fHooked = false;
+				KF = false; // 通知线程停止
+				return 1;
+			}
 		}
-		break;
-
+		break; // XB1 模式或非激活状态，放行物理信号
+	}
 
 		// 【功能8：XB1切换映射&Lshift和Lctrl交换映射】
 
