@@ -694,26 +694,25 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 
 
 			// 【功能5：战术 C 键】
+	// 【功能5：战术 C 键】
 	case 'C': {
+		// 静态变量：用于防止按键长按触发的系统自动重复（Key-Repeat）
 		static bool C_input = false;
-		static bool isIntercepted = false;
 
 		if (state) { // KeyDown
-			// 1. 状态锁：只有物理按下且非 XB1 模式才进入
-			if (isActive && !XB1 && !C_input) {
+			// 1. 状态锁：仅在 isActive 开启且该按键未被锁定（按下中）时触发逻辑
+			// 移除了 !XB1 判断，确保任何模式下逻辑都能触发
+			if (isActive && !C_input) {
 				C_input = true;
-				isIntercepted = true;
 
-				// 2. 判定基准：完全信任用户输入的 RB 记录
+				// --- 核心功能逻辑保持不变 ---
 				if (RB.load(std::memory_order_relaxed)) {
 					// --- 连携模式 ---
-					// 只要右键是按下的，直接触发，并确保作废之前的通行证（如果有）
 					CpressTime.store(0);
 					Tap(VK_OEM_COMMA);
 				}
 				else {
 					// --- 通行证/计时模式 ---
-					// 使用 exchange(0) 实现：如果正在计时，则取出时间戳并清零（手动终止）
 					ULONGLONG oldTime = CpressTime.exchange(0);
 
 					if (oldTime > 0) {
@@ -730,8 +729,6 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 						std::thread([startTime]() {
 							Wait(4000); // 4秒寿命
 							ULONGLONG expected = startTime;
-							// compare_exchange_strong 确保：
-							// 如果 4 秒内没被 Thread_RB 用掉，也没被重复按 C 销毁，才执行过期提示
 							if (CpressTime.compare_exchange_strong(expected, 0)) {
 								if (g_hNotifyWnd && IsTargetActive()) {
 									PostMessage(g_hNotifyWnd, WM_USER + 101, 0, 0);
@@ -740,13 +737,14 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 							}).detach();
 					}
 				}
-				return 1;
+				// 【关键点】：此处不再 return 1。
+				// 逻辑执行完毕后，程序会流向最后的 break，从而将 C 键消息放回给系统。
 			}
 		}
 		else { // KeyUp
 			C_input = false; // 释放状态锁
-			if (isIntercepted) { isIntercepted = false; return 1; }
 		}
+		// 【功能实现】：所有的路径最终都会执行到这里，放行 'C' 键
 		break;
 	}
 
