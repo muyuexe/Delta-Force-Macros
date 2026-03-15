@@ -25,7 +25,7 @@ void SendKey(BYTE vk, bool down, ULONG_PTR extra) {
 void SendMouse(BYTE vk, bool down, ULONG_PTR extra) {
     INPUT input = { 0 };
     input.type = INPUT_MOUSE;
-    input.mi.dwExtraInfo = extra; // 暗号顺延传递
+    input.mi.dwExtraInfo = extra;
 
     if (vk == VK_RBUTTON) {
         input.mi.dwFlags = down ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_RIGHTUP;
@@ -33,7 +33,10 @@ void SendMouse(BYTE vk, bool down, ULONG_PTR extra) {
     else if (vk == VK_LBUTTON) {
         input.mi.dwFlags = down ? MOUSEEVENTF_LEFTDOWN : MOUSEEVENTF_LEFTUP;
     }
-    // 直接用 0 代表滚轮逻辑分支，无需额外定义宏
+    // --- 新增：中键支持 ---
+    else if (vk == VK_MBUTTON) {
+        input.mi.dwFlags = down ? MOUSEEVENTF_MIDDLEDOWN : MOUSEEVENTF_MIDDLEUP;
+    }
     else if (vk == 0) {
         input.mi.dwFlags = MOUSEEVENTF_WHEEL;
         input.mi.mouseData = down ? 120 : -120;

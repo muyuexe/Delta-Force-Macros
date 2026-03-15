@@ -8,21 +8,29 @@ const ULONG_PTR AIM_SKIP = 0xACE;
 #define Pass ([&](){\
     bool _isDown = false; DWORD _vk = 0; ULONG_PTR _ex = 0;\
     if (nCode == HC_ACTION) {\
+        /* 键盘消息审计 */\
         if (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN) { _isDown = true; _vk = ((KBDLLHOOKSTRUCT*)lParam)->vkCode; _ex = ((KBDLLHOOKSTRUCT*)lParam)->dwExtraInfo; }\
         else if (wParam == WM_KEYUP || wParam == WM_SYSKEYUP) { _isDown = false; _vk = ((KBDLLHOOKSTRUCT*)lParam)->vkCode; _ex = ((KBDLLHOOKSTRUCT*)lParam)->dwExtraInfo; }\
+        /* 鼠标左键审计 */\
         else if (wParam == WM_LBUTTONDOWN) { _isDown = true; _vk = VK_LBUTTON; _ex = ((MSLLHOOKSTRUCT*)lParam)->dwExtraInfo; }\
         else if (wParam == WM_LBUTTONUP) { _isDown = false; _vk = VK_LBUTTON; _ex = ((MSLLHOOKSTRUCT*)lParam)->dwExtraInfo; }\
+        /* 鼠标右键审计 */\
         else if (wParam == WM_RBUTTONDOWN) { _isDown = true; _vk = VK_RBUTTON; _ex = ((MSLLHOOKSTRUCT*)lParam)->dwExtraInfo; }\
         else if (wParam == WM_RBUTTONUP) { _isDown = false; _vk = VK_RBUTTON; _ex = ((MSLLHOOKSTRUCT*)lParam)->dwExtraInfo; }\
+        /* 鼠标中键审计 (新增) */\
+        else if (wParam == WM_MBUTTONDOWN) { _isDown = true; _vk = VK_MBUTTON; _ex = ((MSLLHOOKSTRUCT*)lParam)->dwExtraInfo; }\
+        else if (wParam == WM_MBUTTONUP) { _isDown = false; _vk = VK_MBUTTON; _ex = ((MSLLHOOKSTRUCT*)lParam)->dwExtraInfo; }\
+        /* 鼠标侧键审计 */\
         else if (wParam == WM_XBUTTONDOWN || wParam == WM_XBUTTONUP) {\
             _isDown = (wParam == WM_XBUTTONDOWN); _ex = ((MSLLHOOKSTRUCT*)lParam)->dwExtraInfo;\
             _vk = (HIWORD(((MSLLHOOKSTRUCT*)lParam)->mouseData) == 1) ? VK_XBUTTON1 : VK_XBUTTON2;\
         }\
     }\
-    /* 1. g_Out 影子账本 (永远记录) */\
+    \
+    /* 1. g_Out 影子账本：记录所有物理/逻辑发出的按键状态，用于程序退出时对齐 */\
     if (_vk > 0 && _vk < 256) g_Out[_vk].store(_isDown, std::memory_order_relaxed);\
     \
-    /* 2. Aim 业务账本 (在 g_Out 基础上加黑名单) */\
+    /* 2. Aim 业务账本：只有当不带 AIM_SKIP 暗号时，才更新业务逻辑需要的状态 */\
     if (_ex != AIM_SKIP) {\
         if (_vk == 'U') Aim.u.store(_isDown, std::memory_order_relaxed);\
         else if (_vk == VK_RBUTTON) Aim.r.store(_isDown, std::memory_order_relaxed);\
@@ -860,6 +868,38 @@ static LRESULT CALLBACK MouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
 		}
 		break;
 	}
+
+	// --- 中键逻辑：普通状态放行，XB1按下时映射为 V ---
+	case WM_MBUTTONDOWN:
+	case WM_MBUTTONUP:
+	{
+		bool state = (wParam == WM_MBUTTONDOWN);
+		// 静态变量 mbMapped 用于记录“当前这一下”中键是否被转换成了 V
+		static bool mbMapped = false;
+
+		if (state) {
+			// 如果激活且按住了侧键 1
+			if (isActive && XB1.load(std::memory_order_acquire)) {
+				Press('V');
+				mbMapped = true;   // 标记已映射
+				return 1;          // 拦截，不触发原中键功能
+			}
+			else {
+				mbMapped = false;  // 标记未映射，走原功能
+			}
+		}
+		else {
+			// 松开时，如果刚才按下是被映射的，则释放 V
+			if (mbMapped) {
+				Release('V');
+				mbMapped = false;
+				return 1;          // 拦截
+			}
+		}
+		// 只有 mbMapped 为 false 时才会执行到这里，即：正常放行中键
+		break;
+	}
+
 	}
 	return Pass;
 }
@@ -1059,9 +1099,8 @@ static void FreezeAllSubThreads() {
 static void Alignkeys() {
 	for (int vk = 0; vk < 256; vk++) {
 		bool phy = (GetAsyncKeyState(vk) & 0x8000) != 0;
-
 		if (g_Out[vk] != phy) {
-			// 0x01-0x06 为鼠标按键，其余为键盘按键
+			// 0x01-0x06 包含 L, R, Middle, X1, X2
 			if (vk >= 0x01 && vk <= 0x06) SendMouse(vk, phy);
 			else SendKey(vk, phy);
 			g_Out[vk] = phy;
