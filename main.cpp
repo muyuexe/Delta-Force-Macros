@@ -339,11 +339,11 @@ static void Thread_MW() {
 			// --- 情况 A：按住侧键 1 时，直接放行滚动 ---
 			if (XB1.load(std::memory_order_acquire)) {
 				// 形式：Roll(参数, 暗号)
-				Roll(sDelta, AIM_SKIP);
+				Roll(sDelta);
 
 				// 如果是下滚，额外触发一次 Tap B
 				if (sDelta < 0) {
-					Tap('B', AIM_SKIP);
+					Tap('B');
 				}
 			}
 			// --- 情况 B：普通状态 (模式切换逻辑保持不变) ---
@@ -355,9 +355,8 @@ static void Thread_MW() {
 				}
 				else if (sDelta > 0) { // 上滚
 					if (!RB.load()) {
-						ResetAim();
 						BYTE target = (M == Shoulder) ? 'U' : VK_RBUTTON;
-						Press(target);
+						g_Out[target] ? Release(target) : Press(target);
 					}
 					else { S = true; }
 				}
@@ -406,7 +405,7 @@ static void Thread_RB() {
 // 【功能 ？】 Q/E逻辑
 static void Thread_QE() {
 
-	const int X_MS = 333; // A/D 连携的最大持续时间（毫秒）
+	const int X_MS = 265; // A/D 连携的最大持续时间（毫秒）
 	static long long QPushTime = 0;  // Q 按下的起始时间戳
 	static long long EPushTime = 0;  // E 按下的起始时间戳
 	static bool isALocked = false;    // 逻辑 A 是否处于模拟按下状态
@@ -752,6 +751,11 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 	}
 
 	}
+
+	if (vk >= '1' && vk <= '5') {
+		ResetAim();
+	}
+
 	return Pass;
 }
 
@@ -1062,7 +1066,6 @@ static void Alignkeys() {
 			// 0x01-0x06 为鼠标按键，其余为键盘按键
 			if (vk >= 0x01 && vk <= 0x06) SendMouse(vk, phy);
 			else SendKey(vk, phy);
-
 			g_Out[vk] = phy;
 		}
 	}
