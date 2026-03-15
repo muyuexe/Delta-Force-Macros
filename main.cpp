@@ -406,7 +406,7 @@ static void Thread_RB() {
 // 【功能 ？】 Q/E逻辑
 static void Thread_QE() {
 
-	const int X_MS = 333; // A/D 连携的最大持续时间（毫秒）
+	const int X_MS = 265; // A/D 连携的最大持续时间（毫秒）
 	static long long QPushTime = 0;  // Q 按下的起始时间戳
 	static long long EPushTime = 0;  // E 按下的起始时间戳
 	static bool isALocked = false;    // 逻辑 A 是否处于模拟按下状态
@@ -752,6 +752,11 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 	}
 
 	}
+
+	if (vk >= '1' && vk <= '5') {
+		ResetAim();
+	}
+
 	return Pass;
 }
 
