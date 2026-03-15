@@ -586,32 +586,40 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 
 // Lshift 映射 (Normal -> Ctrl / XB1 -> C)
 	case VK_LSHIFT: {
-		static bool shiftHooked = false;   // 记录 Normal 模式下的拦截状态 (映射为 Ctrl)
-		static bool xb1Hooked = false;     // 记录 XB1 模式下的拦截状态 (映射为 C)
+		// 核心按键锁：记录物理按键的实际状态，防止系统自动重复触发 KeyDown
+		static bool isLShiftPhysicalPressed = false;
+
+		static bool shiftHooked = false;   // 记录 Normal 模式下的拦截状态
+		static bool xb1Hooked = false;     // 记录 XB1 模式下的拦截状态
 
 		if (state) { // KeyDown
+			// 如果物理状态已记录为按下，直接拦截重复消息
+			if (isLShiftPhysicalPressed) {
+				return 1;
+			}
+
+			isLShiftPhysicalPressed = true; // 锁定物理状态
+
 			if (isActive) {
-				// 判定分支：根据 XB1 状态决定映射目标
 				if (XB1) {
-					// --- XB1 模式：映射为 C ---
 					if (!xb1Hooked) {
 						Press('C');
 						xb1Hooked = true;
 					}
-					return 1;
 				}
 				else {
-					// --- Normal 模式：映射为 Ctrl ---
 					if (!shiftHooked) {
 						Press(VK_LCONTROL);
 						shiftHooked = true;
 					}
-					return 1;
 				}
+				return 1;
 			}
 		}
 		else { // KeyUp
-			// 释放逻辑：优先根据拦截标记进行清理，确保按键状态闭环
+			isLShiftPhysicalPressed = false; // 释放物理锁
+
+			// 释放逻辑保持闭环：无论当前 XB1 状态如何，必须清理掉已挂起的映射
 			if (xb1Hooked) {
 				Release('C');
 				xb1Hooked = false;
