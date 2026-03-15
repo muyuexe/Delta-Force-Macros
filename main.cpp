@@ -584,18 +584,39 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 
 		// 【功能8：XB1切换映射&Lshift和Lctrl交换映射】
 
-		// Lshift 映射 (Normal -> Ctrl)
+// Lshift 映射 (Normal -> Ctrl / XB1 -> C)
 	case VK_LSHIFT: {
-		static bool shiftHooked = false;
-		if (state) {
-			// 游戏激活且不是 XB1 模式（假设 Normal 模式下交换）
-			if (!shiftHooked && isActive) {
-				Press(VK_LCONTROL);
-				shiftHooked = true;
+		static bool shiftHooked = false;   // 记录 Normal 模式下的拦截状态 (映射为 Ctrl)
+		static bool xb1Hooked = false;     // 记录 XB1 模式下的拦截状态 (映射为 C)
+
+		if (state) { // KeyDown
+			if (isActive) {
+				// 判定分支：根据 XB1 状态决定映射目标
+				if (XB1) {
+					// --- XB1 模式：映射为 C ---
+					if (!xb1Hooked) {
+						Press('C');
+						xb1Hooked = true;
+					}
+					return 1;
+				}
+				else {
+					// --- Normal 模式：映射为 Ctrl ---
+					if (!shiftHooked) {
+						Press(VK_LCONTROL);
+						shiftHooked = true;
+					}
+					return 1;
+				}
 			}
-			if (shiftHooked) return 1;
 		}
-		else {
+		else { // KeyUp
+			// 释放逻辑：优先根据拦截标记进行清理，确保按键状态闭环
+			if (xb1Hooked) {
+				Release('C');
+				xb1Hooked = false;
+				return 1;
+			}
 			if (shiftHooked) {
 				Release(VK_LCONTROL);
 				shiftHooked = false;
@@ -605,7 +626,7 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 		break;
 	}
 
-				  // LControl 映射 (XB1 -> M | Normal -> Lshift)
+	// LControl 映射 (XB1 -> M | Normal -> Lshift)
 	case VK_LCONTROL: {
 		static bool ctrlToM = false;
 		static bool ctrlToShift = false;
@@ -638,7 +659,7 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 		break;
 	}
 
-					// CapsLock 映射 (XB1 -> N)
+	// CapsLock 映射 (XB1 -> N)
 	case VK_CAPITAL: {
 		static bool capsHooked = false;
 		if (state) {
@@ -658,7 +679,7 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 		break;
 	}
 
-				   // X 键映射 (XB1 -> 句号 .)
+	// X 键映射 (XB1 -> 句号 .)
 	case 'X': {
 		static bool xHooked = false; // 记录本次按下是否被拦截
 
@@ -680,7 +701,7 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 		break;
 	}
 
-			// Tab 键映射 (XB1 -> 分号 ;)
+	// Tab 键映射 (XB1 -> 分号 ;)
 	case VK_TAB: {
 		static bool tabHooked = false;
 		if (state) {
@@ -700,42 +721,34 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 		break;
 	}
 
-
-			// 【功能5：战术 C 键】
 	// 【功能5：战术 C 键】
 	case 'C': {
-		// 静态变量：用于防止按键长按触发的系统自动重复（Key-Repeat）
 		static bool C_input = false;
+		static bool isIntercepted = false; // 用于追踪当前按键序列是否被拦截
 
 		if (state) { // KeyDown
-			// 1. 状态锁：仅在 isActive 开启且该按键未被锁定（按下中）时触发逻辑
-			// 移除了 !XB1 判断，确保任何模式下逻辑都能触发
-			if (isActive && !C_input) {
+			// 1. 拦截判定：只有在功能激活（isActive）且非 XB1 模式下才执行拦截并运行功能
+			if (isActive && !XB1 && !C_input) {
 				C_input = true;
+				isIntercepted = true; // 标记此轮按下为拦截状态
 
-				// --- 核心功能逻辑保持不变 ---
+				// --- 某功能逻辑（未改动） ---
 				if (RB.load(std::memory_order_relaxed)) {
-					// --- 连携模式 ---
 					CpressTime.store(0);
 					Tap(VK_OEM_COMMA);
 				}
 				else {
-					// --- 通行证/计时模式 ---
 					ULONGLONG oldTime = CpressTime.exchange(0);
-
 					if (oldTime > 0) {
-						// 情况：重复按下 C，销毁当前计时
 						if (g_hNotifyWnd && IsTargetActive()) {
 							PostMessage(g_hNotifyWnd, WM_USER + 101, 0, 0);
 						}
 					}
 					else {
-						// 情况：开启新计时
 						ULONGLONG startTime = GetTickCount64();
 						CpressTime.store(startTime);
-
 						std::thread([startTime]() {
-							Wait(4000); // 4秒寿命
+							Wait(4000);
 							ULONGLONG expected = startTime;
 							if (CpressTime.compare_exchange_strong(expected, 0)) {
 								if (g_hNotifyWnd && IsTargetActive()) {
@@ -745,14 +758,19 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 							}).detach();
 					}
 				}
-				// 【关键点】：此处不再 return 1。
-				// 逻辑执行完毕后，程序会流向最后的 break，从而将 C 键消息放回给系统。
+				// 【关键】：返回 1 拦截消息，系统不会收到 C 键按下信号
+				return 1;
 			}
 		}
 		else { // KeyUp
-			C_input = false; // 释放状态锁
+			C_input = false;
+			// 2. 如果按下时被拦截了，弹起时也必须拦截，否则会产生孤立的 KeyUp 信号
+			if (isIntercepted) {
+				isIntercepted = false;
+				return 1;
+			}
 		}
-		// 【功能实现】：所有的路径最终都会执行到这里，放行 'C' 键
+		// 非功能触发状态下（如 isActive 为 false 或 XB1 模式），放行按键
 		break;
 	}
 
@@ -778,7 +796,7 @@ static LRESULT CALLBACK MouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
 	// --- 鼠标按键处理 ---
 	switch (wParam) {
 
-		// --- 侧键 1 & 2 处理 (XB1 组合键开关 / XB2 连招触发) ---
+	// --- 侧键 1 & 2 处理 (XB1 组合键开关 / XB2 连招触发) ---
 	case WM_XBUTTONDOWN:
 	case WM_XBUTTONUP:
 	{
